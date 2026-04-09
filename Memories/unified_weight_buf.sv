@@ -1,229 +1,235 @@
 // =============================================================================
-// unified_weight_buf.sv  (rev 3 — FFN sub-mode added to SWIN Block round)
+// unified_weight_buf.sv  (rev 6 — Patch Embedding sub-cycle guard added)
 //
-// ── Round boundary change ─────────────────────────────────────────────────
-//   The SWIN Transformer Block is ONE round (from paper).  MSA and FFN are
-//   executed back-to-back before MWU writes to off-chip memory.  Therefore
-//   the weight buffer must serve BOTH the MSA and FFN weight columns within
-//   mode 2'b10, distinguished by msa_sub_mode:
+// ── What changed from rev 5 ───────────────────────────────────────────────
+//   FIX — CONV mode: enforce sub_cycle == 0 in read-out
 //
-//   msa_sub_mode encoding (mode == 2'b10):
-//     2'b00  QKV / Proj  : 96-weight column  (24 words, 2 sub-cycles)
-//     2'b01  QK^T        : 32-weight column  ( 8 words, 1 sub-cycle)
-//     2'b10  SxV         : 49-weight column  (13 words, 2 sub-cycles)
-//     2'b11  FFN         : up to 384-weight col  (96 words, 8 sub-cycles)
-//                          Used for W_FFN1 (96 w/col = 384÷4)
-//                          AND W_FFN2 (24 w/col = 96÷4, sub-cycles 0..5 only)
-//                          Controller sets correct word count via msa_sub_mode
-//                          and drives sub_cycle 0..N-1 accordingly.
+//   Patch Embedding uses a 4×4×3 = 48-element kernel.
+//   12 PEs × 4 taps = 48 elements → the entire kernel fits in ONE sub-cycle.
+//   Therefore sub_cycle is always 0 during Conv compute, and the index
+//     k = sub_cycle * 48 + pe * 4 + tap
+//   evaluates correctly for sub_cycle=0.
 //
-// ── MAX_BYTES change ──────────────────────────────────────────────────────
-//   Old MAX_BYTES = 384  (MLP W2: 96 words × 4 = 384 B)
-//   New MAX_BYTES = 384  (FFN W1 col: 96 words × 4 = 384 B) — same size!
-//   No change needed; 384 B already covers the largest column (W_FFN1).
+//   However, if the controller ever accidentally sends sub_cycle > 0 (e.g.
+//   a signal glitch or wrong FSM entry), k would exceed BYTES_CONV=48 and
+//   the out-of-bounds guard (k < BYTES_CONV) would correctly zero the output
+//   — so the gate WAS already there and worked.
 //
-// ── Sub-cycle counts per sub-mode ────────────────────────────────────────
-//   2'b00  QKV/Proj  : 96  B → 2 sub-cycles  (2 × 48 B = 96 B)
-//   2'b01  QK^T      : 32  B → 1 sub-cycle   (1 × 48 B, 32 used)
-//   2'b10  SxV       : 52  B → 2 sub-cycles  (1st=48B full, 2nd=4B partial)
-//   2'b11  FFN_W1    : 384 B → 8 sub-cycles  (8 × 48 B = 384 B)
-//           FFN_W2   :  96 B → 2 sub-cycles  (same as QKV/Proj)
-//   The controller drives the correct number of sub-cycles; the buffer
-//   zero-fills any PE taps beyond the valid byte range automatically.
+//   What was MISSING: a clear comment and the defensive assertion that makes
+//   the intent unambiguous.  Added below as a simulation-only assertion.
+//   The read logic itself is functionally correct in rev 5 — this is a
+//   clarification and defensive hardening only.
 //
-// ── All other behaviour unchanged ────────────────────────────────────────
+//   Also corrected: BYTES_CONV localparams comment to explicitly state
+//   "1 sub-cycle only" and updated the mode table in the header.
+//
+// ── Mode / sub-mode table (complete) ─────────────────────────────────────
+//
+//   mode 2'b00  CONV (Patch Embedding)
+//     Kernel: 4×4×3 = 48 bytes → fits in 1 sub-cycle (sub_cycle always 0)
+//     conv_load_pe_idx = 0..11  (one 32-bit word per PE)
+//     Weight layout: bank[pe*4 + tap]  → 48 bytes total
+//
+//   mode 2'b01  MLP (Patch Merging)
+//     mlp_sub_mode = 1'b0 → W1: 96 B, 2 sub-cycles (0..1)
+//     mlp_sub_mode = 1'b1 → W2: 384 B, 8 sub-cycles (0..7)
+//
+//   mode 2'b10  SWIN Block (W-MSA / SW-MSA + FFN)
+//     msa_sub_mode 2'b00 → QKV/Proj/FFN W2:  96 B, 2 sub-cycles
+//     msa_sub_mode 2'b01 → QK^T:              32 B, 1 sub-cycle
+//     msa_sub_mode 2'b10 → SxV:               52 B, 2 sub-cycles (2nd partial)
+//     msa_sub_mode 2'b11 → FFN W1:           384 B, 8 sub-cycles
+//
+// ── Bank layout ──────────────────────────────────────────────────────────
+//   Single contiguous byte array [0 .. MAX_BYTES-1].
+//   Sub-cycle k reads bytes [k*48 .. k*48+47] from the active bank.
+//   Bytes at index >= valid_bytes for the current sub-mode are zero-masked.
+//   MAX_BYTES = 384 (FFN W1 column — largest operand).
 // =============================================================================
 
 module unified_weight_buf #(
-    parameter int MAX_BYTES = 384,   // largest column: FFN_W1 = 96 words × 4 B
+    parameter int MAX_BYTES = 384,
     parameter int N_PE      = 12,
     parameter int N_TAP     = 4
 )(
     input  logic        clk,
     input  logic        rst_n,
 
-    // ── Mode select ───────────────────────────────────────────────────────
-    // 2'b00 = Conv (Patch Embedding / Patch Merging conv kernel)
-    // 2'b01 = MLP  (Patch Merging linear — legacy, kept for compatibility)
-    // 2'b10 = SWIN Block (W-MSA QKV/QK^T/SxV + FFN W1/W2, single round)
+    // 2'b00 = CONV, 2'b01 = MLP, 2'b10 = SWIN Block
     input  logic [1:0]  mode,
 
-    // ── Bank swap (from controller) ───────────────────────────────────────
+    // Promotes shadow → active
     input  logic        swap,
 
-    // ── Conv load (mode == 2'b00) ─────────────────────────────────────────
+    // Pulse once before each new shadow fill — zeroes entire shadow bank
+    // (guarantees clean padding for SxV 49→52 B and QK^T 32 B)
+    input  logic        shadow_clr,
+
+    // ── CONV load (mode == 2'b00) ─────────────────────────────────────────
+    // conv_load_pe_idx = 0..11; one 32-bit word per PE
+    // Address: bank[pe_idx * N_TAP + 0..3]
     input  logic        conv_load_en,
     input  logic [3:0]  conv_load_pe_idx,
     input  logic [31:0] conv_load_data,
 
-    input  logic        conv_bias_load_en,
-    input  logic [31:0] conv_bias_load_data,
-
-    // ── MLP load (mode == 2'b01, Patch Merging legacy path) ──────────────
+    // ── MLP load (mode == 2'b01) ──────────────────────────────────────────
     input  logic        mlp_load_en,
-    input  logic [6:0]  mlp_load_k_word,   // 0..95 (W2 col), 0..23 (W1 col)
+    input  logic        mlp_sub_mode,         // 0=W1 96B, 1=W2 384B
+    input  logic [6:0]  mlp_load_k_word,      // 0..23 (W1) or 0..95 (W2)
     input  logic [31:0] mlp_load_data,
 
-    // ── SWIN Block load (mode == 2'b10 — MSA and FFN share this path) ─────
-    // msa_load_word range:
-    //   QKV/Proj  : 0..23  (24 words per column)
-    //   QK^T      : 0..7   ( 8 words per column)
-    //   SxV       : 0..12  (13 words, last zero-padded)
-    //   FFN W1    : 0..95  (96 words per column)
-    //   FFN W2    : 0..23  (24 words per column, same width as QKV)
+    // ── SWIN Block load (mode == 2'b10) ───────────────────────────────────
     input  logic        msa_load_en,
-    input  logic [6:0]  msa_load_word,     // expanded to 7 bits (was 5) for FFN W1 (0..95)
+    input  logic [6:0]  msa_load_word,        // 0..95 (7 bits covers all sub-modes)
     input  logic [31:0] msa_load_data,
+    input  logic [1:0]  msa_sub_mode,         // controls valid-byte window
 
-    // ── Sub-mode (MSA phase or FFN phase within SWIN Block round) ─────────
-    // 2'b00 = QKV/Proj   (96 B, 2 sub-cycles)
-    // 2'b01 = QK^T       (32 B, 1 sub-cycle)
-    // 2'b10 = SxV        (52 B, 2 sub-cycles)
-    // 2'b11 = FFN        (up to 384 B, up to 8 sub-cycles for W1,
-    //                     or 96 B, 2 sub-cycles for W2 — controller controls)
-    input  logic [1:0]  msa_sub_mode,
-
-    // ── Shared sub-cycle counter (from controller) ────────────────────────
+    // ── Sub-cycle counter ─────────────────────────────────────────────────
     input  logic [2:0]  sub_cycle,
 
-    // ── Outputs to MMU ────────────────────────────────────────────────────
-    output logic [7:0]  w_out   [0:N_PE-1][0:N_TAP-1],
-    output logic [31:0] bias_out
+    // ── Weight output to MMU ──────────────────────────────────────────────
+    output logic [7:0]  w_out [0:N_PE-1][0:N_TAP-1]
 );
 
 // =============================================================================
-// Valid byte counts per sub-mode (SWIN Block mode)
+// Valid-byte constants
 // =============================================================================
-localparam int MSA_QKV_COL_BYTES = 96;    // 24 words × 4 B
-localparam int MSA_QKT_COL_BYTES = 32;    //  8 words × 4 B
-localparam int MSA_SV_COL_BYTES  = 52;    // 13 words × 4 B (49 B padded to 52)
-localparam int FFN_W1_COL_BYTES  = 384;   // 96 words × 4 B  (384 inputs)
-// FFN_W2 col = 96 B = same as MSA_QKV_COL_BYTES (96 inputs)
-// Controller distinguishes W1 vs W2 by driving the correct msa_sub_mode:
-//   W1 → msa_sub_mode = 2'b11, valid_bytes = 384
-//   W2 → msa_sub_mode = 2'b00, valid_bytes =  96  (reuse QKV sub-mode)
+localparam int BYTES_CONV = N_PE * N_TAP;   //  48 B  — 1 sub-cycle ONLY
+localparam int BYTES_W1   = 96;             //  96 B  — 2 sub-cycles
+localparam int BYTES_W2   = MAX_BYTES;      // 384 B  — 8 sub-cycles
+localparam int BYTES_QKV  = 96;             //  96 B  — 2 sub-cycles
+localparam int BYTES_QKT  = 32;             //  32 B  — 1 sub-cycle
+localparam int BYTES_SV   = 52;             //  52 B  — 2 sub-cycles (49 + 3 zero-pad)
+localparam int BYTES_FFN1 = MAX_BYTES;      // 384 B  — 8 sub-cycles
 
 // =============================================================================
-// Internal storage: double-banked byte array + bias register
+// Double-banked storage
 // =============================================================================
-logic [7:0]  bank  [0:1][0:MAX_BYTES-1];
-logic [31:0] bias  [0:1];
+logic [7:0]  bank [0:1][0:MAX_BYTES-1];
 logic        active;
 logic        shadow;
 assign shadow = ~active;
 
-// ── Bank swap ─────────────────────────────────────────────────────────────
 always_ff @(posedge clk or negedge rst_n)
     if (!rst_n) active <= 1'b0;
     else if (swap) active <= shadow;
 
 // =============================================================================
-// Shadow-bank write  (only one mode active at a time)
+// Shadow bank write (shadow_clr has highest priority)
 // =============================================================================
 always_ff @(posedge clk) begin
-    case (mode)
+    if (shadow_clr) begin
+        for (int i = 0; i < MAX_BYTES; i++)
+            bank[shadow][i] <= 8'h00;
+    end else begin
+        case (mode)
 
-        // ── Conv (Patch Embedding / Patch Merging conv kernel) ────────────
-        2'b00: begin
-            if (conv_load_en) begin
-                bank[shadow][conv_load_pe_idx * N_TAP    ] <= conv_load_data[ 7: 0];
-                bank[shadow][conv_load_pe_idx * N_TAP + 1] <= conv_load_data[15: 8];
-                bank[shadow][conv_load_pe_idx * N_TAP + 2] <= conv_load_data[23:16];
-                bank[shadow][conv_load_pe_idx * N_TAP + 3] <= conv_load_data[31:24];
+            // ── CONV: 12 words, 48 bytes ──────────────────────────────────
+            // Kernel element layout: bank[pe * N_TAP + tap]
+            // Each 32-bit word packs 4 consecutive kernel weights for one PE.
+            // All 48 bytes are written in 12 load calls (one per PE).
+            2'b00: begin
+                if (conv_load_en) begin
+                    bank[shadow][conv_load_pe_idx * N_TAP    ] <= conv_load_data[ 7: 0];
+                    bank[shadow][conv_load_pe_idx * N_TAP + 1] <= conv_load_data[15: 8];
+                    bank[shadow][conv_load_pe_idx * N_TAP + 2] <= conv_load_data[23:16];
+                    bank[shadow][conv_load_pe_idx * N_TAP + 3] <= conv_load_data[31:24];
+                end
             end
-            if (conv_bias_load_en)
-                bias[shadow] <= conv_bias_load_data;
-        end
 
-        // ── MLP (Patch Merging legacy linear path) ────────────────────────
-        2'b01: begin
-            if (mlp_load_en) begin
-                bank[shadow][mlp_load_k_word * N_TAP    ] <= mlp_load_data[ 7: 0];
-                bank[shadow][mlp_load_k_word * N_TAP + 1] <= mlp_load_data[15: 8];
-                bank[shadow][mlp_load_k_word * N_TAP + 2] <= mlp_load_data[23:16];
-                bank[shadow][mlp_load_k_word * N_TAP + 3] <= mlp_load_data[31:24];
+            // ── MLP: W1 (24 words, 96 B) or W2 (96 words, 384 B) ─────────
+            2'b01: begin
+                if (mlp_load_en) begin
+                    bank[shadow][mlp_load_k_word * N_TAP    ] <= mlp_load_data[ 7: 0];
+                    bank[shadow][mlp_load_k_word * N_TAP + 1] <= mlp_load_data[15: 8];
+                    bank[shadow][mlp_load_k_word * N_TAP + 2] <= mlp_load_data[23:16];
+                    bank[shadow][mlp_load_k_word * N_TAP + 3] <= mlp_load_data[31:24];
+                end
             end
-        end
 
-        // ── SWIN Block (MSA + FFN — single round) ─────────────────────────
-        // All sub-modes (QKV/QK^T/SxV/FFN) share the same byte-level write.
-        // msa_load_word is 7 bits to cover 0..95 for FFN_W1.
-        2'b10: begin
-            if (msa_load_en) begin
-                bank[shadow][msa_load_word * N_TAP    ] <= msa_load_data[ 7: 0];
-                bank[shadow][msa_load_word * N_TAP + 1] <= msa_load_data[15: 8];
-                bank[shadow][msa_load_word * N_TAP + 2] <= msa_load_data[23:16];
-                bank[shadow][msa_load_word * N_TAP + 3] <= msa_load_data[31:24];
+            // ── SWIN Block: all sub-modes share one write path ─────────────
+            2'b10: begin
+                if (msa_load_en) begin
+                    bank[shadow][msa_load_word * N_TAP    ] <= msa_load_data[ 7: 0];
+                    bank[shadow][msa_load_word * N_TAP + 1] <= msa_load_data[15: 8];
+                    bank[shadow][msa_load_word * N_TAP + 2] <= msa_load_data[23:16];
+                    bank[shadow][msa_load_word * N_TAP + 3] <= msa_load_data[31:24];
+                end
             end
-        end
 
-        default: ;
-    endcase
+            default: ;
+        endcase
+    end
 end
 
 // =============================================================================
-// Active-bank read-out → w_out[pe][tap]
+// Active-bank read-out  →  w_out[pe][tap]
 //
-// sub_cycle selects a 48-byte window (12 PE × 4 tap) within the active bank.
-// For modes where the column fits in 1 sub-cycle, controller drives sub_cycle=0.
+// For every mode:
+//   k = sub_cycle * (N_PE * N_TAP) + pe * N_TAP + tap
+//   w_out[pe][tap] = (k < valid_bytes) ? bank[active][k] : 8'h00
+//
+// CONV note: valid_bytes = 48, sub_cycle is always 0 during Conv compute.
+//   k = 0*48 + pe*4 + tap ∈ [0..47] — always within range.
+//   If sub_cycle were non-zero the guard (k < 48) would correctly zero output.
+//   The assertion below catches this in simulation.
 // =============================================================================
 always_comb begin
-    // Default: drive zeros
     for (int pe = 0; pe < N_PE; pe++)
         for (int tap = 0; tap < N_TAP; tap++)
-            w_out[pe][tap] = 8'b0;
-    bias_out = 32'd0;
+            w_out[pe][tap] = 8'h00;
 
     case (mode)
 
-        // ── Conv ──────────────────────────────────────────────────────────
+        // ── CONV: 1 sub-cycle, 48 bytes ───────────────────────────────────
         2'b00: begin
             for (int pe = 0; pe < N_PE; pe++)
-                for (int tap = 0; tap < N_TAP; tap++)
-                    w_out[pe][tap] = bank[active][pe * N_TAP + tap];
-            bias_out = bias[active];
-        end
-
-        // ── MLP (Patch Merging legacy) ────────────────────────────────────
-        2'b01: begin
-            for (int pe = 0; pe < N_PE; pe++)
                 for (int tap = 0; tap < N_TAP; tap++) begin
-                    automatic int k = int'(sub_cycle) * (N_PE * N_TAP)
-                                      + pe * N_TAP + tap;
-                    w_out[pe][tap] = (k < MAX_BYTES) ? bank[active][k] : 8'b0;
+                    automatic int k = int'(sub_cycle) * (N_PE * N_TAP) + pe * N_TAP + tap;
+                    // Guard covers sub_cycle=0 (normal) and any unexpected value
+                    w_out[pe][tap] = (k < BYTES_CONV) ? bank[active][k] : 8'h00;
                 end
         end
 
-        // ── SWIN Block (MSA + FFN) ────────────────────────────────────────
-        // sub_cycle selects the 48-byte slice of the currently-loaded column.
-        //
-        //   2'b00 QKV/Proj : 96 B → sub_cycle 0..1
-        //   2'b01 QK^T     : 32 B → sub_cycle 0  (only, 32 valid, 16 zero)
-        //   2'b10 SxV      : 52 B → sub_cycle 0 (48 B), 1 (4 B valid)
-        //   2'b11 FFN      : W_FFN1: 384 B → sub_cycle 0..7 (full)
-        //                    W_FFN2: 96 B  → sub_cycle 0..1 (controller
-        //                            switches msa_sub_mode to 2'b00 for W2,
-        //                            so W2 reuses the QKV/Proj path above)
-        2'b10: begin
-            automatic int valid_bytes;
-            case (msa_sub_mode)
-                2'b00:   valid_bytes = MSA_QKV_COL_BYTES;  // QKV, Proj, FFN W2
-                2'b01:   valid_bytes = MSA_QKT_COL_BYTES;  // QK^T
-                2'b10:   valid_bytes = MSA_SV_COL_BYTES;   // SxV
-                2'b11:   valid_bytes = FFN_W1_COL_BYTES;   // FFN W1 (384 B)
-                default: valid_bytes = 0;
-            endcase
-
+        // ── MLP: W1 or W2 ─────────────────────────────────────────────────
+        2'b01: begin
+            automatic int vb_mlp = mlp_sub_mode ? BYTES_W2 : BYTES_W1;
             for (int pe = 0; pe < N_PE; pe++)
                 for (int tap = 0; tap < N_TAP; tap++) begin
-                    automatic int k = int'(sub_cycle) * (N_PE * N_TAP)
-                                      + pe * N_TAP + tap;
-                    w_out[pe][tap] = (k < valid_bytes) ? bank[active][k] : 8'b0;
+                    automatic int k = int'(sub_cycle) * (N_PE * N_TAP) + pe * N_TAP + tap;
+                    w_out[pe][tap] = (k < vb_mlp) ? bank[active][k] : 8'h00;
+                end
+        end
+
+        // ── SWIN Block ────────────────────────────────────────────────────
+        2'b10: begin
+            automatic int vb_msa;
+            case (msa_sub_mode)
+                2'b00:   vb_msa = BYTES_QKV;
+                2'b01:   vb_msa = BYTES_QKT;
+                2'b10:   vb_msa = BYTES_SV;
+                2'b11:   vb_msa = BYTES_FFN1;
+                default: vb_msa = 0;
+            endcase
+            for (int pe = 0; pe < N_PE; pe++)
+                for (int tap = 0; tap < N_TAP; tap++) begin
+                    automatic int k = int'(sub_cycle) * (N_PE * N_TAP) + pe * N_TAP + tap;
+                    w_out[pe][tap] = (k < vb_msa) ? bank[active][k] : 8'h00;
                 end
         end
 
         default: ;
     endcase
 end
+
+// =============================================================================
+// Simulation assertion — Conv must always use sub_cycle == 0
+// =============================================================================
+// synthesis translate_off
+always_ff @(posedge clk) begin
+    if (mode == 2'b00 && sub_cycle != 3'd0)
+        $error("[unified_weight_buf] CONV mode: sub_cycle=%0d but must be 0 (kernel fits in 1 sub-cycle)", sub_cycle);
+end
+// synthesis translate_on
 
 endmodule
