@@ -1,7 +1,26 @@
 // =============================================================================
-// full_system_top.sv  (rev 7 — shift_buffer added)
+// full_system_top.sv  (rev 8 — MHA ILB raw-write bypass)
 //
-// ── What changed from rev 6 ───────────────────────────────────────────────
+// ── What changed from rev 7 ───────────────────────────────────────────────
+//   1. New wire: obuf_raw_rd_data [31:0]
+//      output_buffer now exposes raw_rd_data (= buf[rd_idx]) in addition to
+//      the existing rd_data that feeds the post-proc pipeline.  The raw wire
+//      bypasses the quantiser → ReLU → post_proc_mux chain entirely.
+//
+//   2. New wire: ctrl_ilb_wr_bypass
+//      Asserted whenever mode == 2'b10 (MHA).  Passed to output_memory as
+//      ilb_wr_bypass, selecting ilb_raw_wr_data instead of post_proc_data as
+//      the write source.  All MHA intermediate results (Q, K, V, S, A, PROJ,
+//      FFN1, FFN2) are stored raw; the post-proc pipeline remains active only
+//      for Conv and MLP final outputs.
+//
+//   3. output_buffer instantiation gains: .raw_rd_data (obuf_raw_rd_data)
+//
+//   4. output_memory instantiation gains:
+//        .ilb_raw_wr_data (obuf_raw_rd_data)
+//        .ilb_wr_bypass   (ctrl_ilb_wr_bypass)
+//
+// ── (rev 7 notes preserved below) ────────────────────────────────────────
 //   1. Removed:  input logic signed [7:0] quant_shift_amt
 //      The per-element quantization shift amount is now driven entirely by the
 //      new shift_buffer (u_sbuf) rather than a single static value from the
@@ -242,9 +261,21 @@ logic [31:0] mmu_out      [0:6];
 // Output buffer / post-processing wires
 // =============================================================================
 logic [31:0]        obuf_rd_data;
+logic [31:0]        obuf_raw_rd_data;   // NEW rev 8: raw (no post-proc) from output_buffer
 logic signed [31:0] quant_data;
 logic signed [31:0] relu_data;
 logic signed [31:0] post_proc_data;
+
+// ── MHA ILB bypass control (NEW rev 8) ────────────────────────────────────
+// When in MHA mode all output_memory writes go through the raw data path,
+// bypassing the quantiser and ReLU.  The single-bit mux inside output_memory
+// (ilb_wr_bypass) selects between post_proc_data and obuf_raw_rd_data.
+//
+// If finer-grained control is needed (e.g. quantise the final FFN2 output
+// before off-chip transfer), the unified_controller can expose a dedicated
+// ctrl_ilb_wr_bypass output and replace the expression below.
+logic ctrl_ilb_wr_bypass;
+assign ctrl_ilb_wr_bypass = (mode == 2'b10);
 
 // ── Shift buffer → quantizer ──────────────────────────────────────────────
 logic signed [7:0]  sbuf_shift_amt;   // drives rounding_shifter.shift_amt
@@ -387,19 +418,25 @@ fib_memory u_fib (
 
 // =============================================================================
 // Instance: output_memory (also ILB for MHA)
+// ── Rev 8 additions ──────────────────────────────────────────────────────
+//   ilb_raw_wr_data : obuf_raw_rd_data — raw accumulator from output_buffer,
+//                     bypasses quantiser/ReLU for all MHA intermediate stores.
+//   ilb_wr_bypass   : ctrl_ilb_wr_bypass — 1 in MHA mode, 0 in Conv/MLP.
 // =============================================================================
 output_memory u_omem (
-    .clk         (clk),
-    .rst_n       (rst_n),
-    .wr_addr     (ctrl_omem_wr_addr),
-    .wr_data     (post_proc_data),
-    .wr_en       (ctrl_omem_wr_en),
-    .cpu_rd_addr (cpu_omem_rd_addr),
-    .cpu_rd_en   (cpu_omem_rd_en),
-    .cpu_rd_data (cpu_omem_rd_data),
-    .fb_rd_addr  (omem_fb_rd_addr),
-    .fb_rd_en    (omem_fb_rd_en),
-    .fb_rd_data  (omem_fb_rd_data)
+    .clk             (clk),
+    .rst_n           (rst_n),
+    .wr_addr         (ctrl_omem_wr_addr),
+    .wr_data         (post_proc_data),      // post_proc path (Conv/MLP)
+    .ilb_raw_wr_data (obuf_raw_rd_data),    // raw path       (MHA)
+    .ilb_wr_bypass   (ctrl_ilb_wr_bypass),  // select raw when in MHA mode
+    .wr_en           (ctrl_omem_wr_en),
+    .cpu_rd_addr     (cpu_omem_rd_addr),
+    .cpu_rd_en       (cpu_omem_rd_en),
+    .cpu_rd_data     (cpu_omem_rd_data),
+    .fb_rd_addr      (omem_fb_rd_addr),
+    .fb_rd_en        (omem_fb_rd_en),
+    .fb_rd_data      (omem_fb_rd_data)
 );
 
 // =============================================================================
@@ -477,14 +514,18 @@ mmu_top u_mmu (
 
 // =============================================================================
 // Instance: output_buffer
+// ── Rev 8 addition ───────────────────────────────────────────────────────
+//   raw_rd_data : obuf_raw_rd_data — separate wire for raw ILB write path.
+//   rd_data     : obuf_rd_data     — unchanged; still feeds post_proc chain.
 // =============================================================================
 output_buffer u_obuf (
-    .clk        (clk),
-    .rst_n      (rst_n),
-    .capture_en (ctrl_obuf_capture_en),
-    .mmu_out    (mmu_out),
-    .rd_idx     (ctrl_obuf_rd_idx),
-    .rd_data    (obuf_rd_data)
+    .clk         (clk),
+    .rst_n       (rst_n),
+    .capture_en  (ctrl_obuf_capture_en),
+    .mmu_out     (mmu_out),
+    .rd_idx      (ctrl_obuf_rd_idx),
+    .rd_data     (obuf_rd_data),
+    .raw_rd_data (obuf_raw_rd_data)    // NEW rev 8: to output_memory.ilb_raw_wr_data
 );
 
 // =============================================================================
