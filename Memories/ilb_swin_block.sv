@@ -1,78 +1,166 @@
 // =============================================================================
 // ilb_swin_block.sv
 //
-// Intermediate Layer Buffer — Swin Transformer Block
+// Intermediate Layer Buffer — Swin Transformer Block  (extended)
 //
-// This module is the ILB assigned to the Swin Block round.  It collects all
-// five sub-buffers required to store intermediate matrices between the MSA
-// and FFN operations within ONE complete Swin Block round (W-MSA or SW-MSA
-// + FFN), without any off-chip traffic between these steps.
+// This is the top-level ILB wrapper.  It instantiates ALL seven sub-buffers
+// that together cover:
+//   • Patch Embedding convolution output          (ilb_patch_embed_buf)
+//   • Patch Merging spatial concat + FC result    (ilb_patch_merge_buf)
+//   • One complete Swin Block (W-MSA or SW-MSA + FFN):
+//       QKV / Proj, Attention scores, Context vectors,
+//       Proj+residual, FFN1-GELU intermediate.
 //
 // ── Sub-buffer inventory ─────────────────────────────────────────────────
 //
-//   Buffer             Module           Shape       Bytes    Reuse
-//   ─────────────────  ───────────────  ──────────  ───────  ──────────────
-//   QKV / Proj store   ilb_qkv_buf      49 × 96     4704 B   Q, K, V, Proj out
-//   Attention scores   ilb_score_buf    49 × 49×32  9604 B   per head, reused ×3
-//   Context vectors    ilb_context_buf  49 × 96     4704 B   concat A_0,A_1,A_2
-//   Proj + residual    ilb_proj_buf     49 × 96     4704 B   Out_MSA, FFN input
-//   FFN1 intermediate  ilb_ffn1_buf     49 × 384   18816 B   Z = GELU(X×W_FFN1)
-//   ─────────────────  ───────────────  ──────────  ───────
-//   Total                                          42532 B  (≈ 41.5 KB)
+//   Buffer               Module                Shape           Bytes
+//   ───────────────────  ────────────────────  ──────────────  ─────────
+//   Patch embed output   ilb_patch_embed_buf   56×56×96        301,056 B
+//   Patch merge store    ilb_patch_merge_buf   28×28×384(A)    301,056 B
+//                                              28×28×192(B)    150,528 B
+//   QKV / Proj store     ilb_qkv_buf           49×96             4,704 B
+//   Attention scores     ilb_score_buf         49×49×32          9,604 B
+//   Context vectors      ilb_context_buf       49×96             4,704 B
+//   Proj + residual      ilb_proj_buf          49×96             4,704 B
+//   FFN1 intermediate    ilb_ffn1_buf          49×384           18,816 B
+//   ───────────────────  ────────────────────  ──────────────  ─────────
+//   Total on-chip peak                                         794,952 B (≈ 776 KB)
+//   (patch_embed and patch_merge Phase-A overlap in practice; both cannot
+//    be simultaneously active since patch_merge writes begin only after
+//    patch_embed is flushed.)
 //
-// ── Swin Block dataflow and buffer usage ─────────────────────────────────
+// ── Stage-0 : Patch Embedding ─────────────────────────────────────────────
 //
-//   Step  Operation           Read from          Write to
-//   ────  ──────────────────  ─────────────────  ──────────────────
-//   1     X × W_Q → Q         FIB (X)            ilb_qkv_buf
-//   2     X × W_K → K         FIB (X)            ilb_qkv_buf (swap)
-//   3     X × W_V → V         FIB (X)            ilb_qkv_buf (swap)
-//   4a    Q_h × K_h^T → S_h   ilb_qkv_buf (Q,K)  ilb_score_buf
-//   4b    mask(S_h) [SW only]  ilb_score_buf RMW  ilb_score_buf (in-place)
-//   4c    Softmax(S_h)         ilb_score_buf      ilb_score_buf (in-place)
-//   5     S_h × V_h → A_h     ilb_score_buf,     ilb_context_buf
-//                              ilb_qkv_buf (V)
-//   6     concat(A)×W_P→M_out ilb_context_buf    ilb_qkv_buf (Proj)
-//   7     M_out + X → Out_MSA ilb_qkv_buf + FIB  ilb_proj_buf  (RMW)
-//   8     Out_MSA × W_FFN1    ilb_proj_buf        → GCU directly
-//   9     GELU(step8)         GCU output          ilb_ffn1_buf
-//   10    Z × W_FFN2 → F_out  ilb_ffn1_buf        → ilb_proj_buf (RMW)
-//   11    F_out + Out_MSA     ilb_proj_buf RMW    ilb_proj_buf (in-place)
-//   12    flush to off-chip   ilb_proj_buf        MWU → off-chip
+//   Step  Operation                  Read from        Write to
+//   ────  ─────────────────────────  ───────────────  ─────────────────────
+//   PE-1  Conv 4×4×3, stride 4,      Input SRAM/FIB   output_buffer (OB)
+//         96 kernels → (56×56,96)    (224×224×3)      ↓ quantiser
+//   PE-2  Quantise + store           output_buffer    ilb_patch_embed_buf
+//         (7 pixels/cycle, 8 cyc/    (7 pixels/cyc,   wr_ch/wr_row/wr_col_grp
+//          row, 448 cyc/ch)           43,008 cyc total)
 //
-// ── Reuse note ────────────────────────────────────────────────────────────
-//   ilb_qkv_buf is reused for Q (step 1), then K (step 2), then V (step 3),
-//   then Proj output (step 6).  The swap mechanism ensures prior content is
-//   consumed before the bank is overwritten.
+// ── Stage-1 : Patch Merging ──────────────────────────────────────────────
 //
-//   ilb_score_buf is reused once per head (head 0, 1, 2) — 3 reuses per window.
-//   score_commit / score_clear control the valid flag between reuses.
+//   Step  Operation                  Read from              Write to
+//   ────  ─────────────────────────  ─────────────────────  ──────────────────
+//   PM-1  Spatial Merge (by memory)  ilb_patch_embed_buf    ilb_patch_merge_buf
+//         Concatenate 2×2 pixels     (rd_en / rd_addr)      (spa_wr_en/addr/data)
+//         → (28×28, 384)             1 byte/cyc read        1 byte/cyc write
+//   PM-2  Flush (28×28,384)         ilb_patch_merge_buf    Off-chip memory
+//         to off-chip               (pa_rd_* / flush_req)  (MWU — external)
+//   PM-3  FC layer 384→192 (by MMU) Off-chip (28×28,384)   output_buffer
+//         28×28 patches × FC kernel  (external to this ILB) ↓ quantiser
+//   PM-4  Store FC result            output_buffer           ilb_patch_merge_buf
+//         (7 patches/cyc,            (fc_wr_en/row/col)      fc_wr_data[7]
+//          ~21,504 write groups)
+//
+// ── Stage-2 : Swin Block (W-MSA / SW-MSA + FFN) ───────────────────────────
+//
+//   Step  Operation             Read from          Write to
+//   ────  ───────────────────── ─────────────────  ──────────────────
+//   1     X × W_Q → Q           FIB (X)            ilb_qkv_buf
+//   2     X × W_K → K           FIB (X)            ilb_qkv_buf (swap)
+//   3     X × W_V → V           FIB (X)            ilb_qkv_buf (swap)
+//   4a    Q_h × K_h^T → S_h     ilb_qkv_buf (Q,K)  ilb_score_buf
+//   4b    mask(S_h) [SW only]    ilb_score_buf RMW  ilb_score_buf (in-place)
+//   4c    Softmax(S_h)           ilb_score_buf      ilb_score_buf (in-place)
+//   5     S_h × V_h → A_h       ilb_score_buf,     ilb_context_buf
+//                                ilb_qkv_buf (V)
+//   6     concat(A)×W_P→M_out   ilb_context_buf    ilb_qkv_buf (Proj)
+//   7     M_out + X → Out_MSA   ilb_qkv_buf + FIB  ilb_proj_buf (RMW)
+//   8     Out_MSA × W_FFN1      ilb_proj_buf        → GCU directly
+//   9     GELU(step8)           GCU output          ilb_ffn1_buf
+//   10    Z × W_FFN2 → F_out    ilb_ffn1_buf        → ilb_proj_buf (RMW)
+//   11    F_out + Out_MSA       ilb_proj_buf RMW    ilb_proj_buf (in-place)
+//   12    flush to off-chip     ilb_proj_buf        MWU → off-chip
 //
 // ── Connections to the wider system ──────────────────────────────────────
-//   This module exposes all sub-buffer ports directly at the top level.
-//   The controller (unified_controller) drives all addresses and enables.
-//   The adder for residual / mask operations lives in full_system_top and
-//   is fed by rmw_rd_data outputs and FIB / mask_buffer data externally.
+//   All sub-buffer ports are exposed flat at this top level.
+//   unified_controller drives all addresses, enables, and phase sequencing.
+//   The residual adder and off-chip DMA engine live in full_system_top.
+//   MMU is separate (mmu_top.sv) — NOT touched by this file.
 //
 // ── What this module does NOT contain ────────────────────────────────────
-//   • Softmax (SCU) — separate module
-//   • GELU (GCU) — separate module
-//   • Mask buffer — mask_buffer.sv (separate, already designed)
-//   • Residual adder — combinatorial, in full_system_top
-//   • LayerNorm — separate (if implemented; Swin often uses post-norm)
+//   • MMU / PE array             — mmu_top.sv (untouched)
+//   • Softmax unit (SCU)         — separate
+//   • GELU unit (GCU)            — separate
+//   • Mask buffer                — mask_buffer.sv (separate)
+//   • Residual adder             — combinatorial, in full_system_top
+//   • Output quantiser / post-proc — full_system_top pipeline
+//   • MWU / off-chip DMA engine  — full_system_top
 //
 // =============================================================================
 
 module ilb_swin_block #(
+    // ── Patch Embedding / Merging ──────────────────────────────────────────
+    parameter int H_EMB  = 56,    // embed feature map height
+    parameter int W_EMB  = 56,    // embed feature map width
+    parameter int C_EMB  = 96,    // embed output channels
+    parameter int H_MRG  = 28,    // merge output spatial height
+    parameter int W_MRG  = 28,    // merge output spatial width
+    parameter int C_SPA  = 384,   // merge Phase-A channels (4 × C_EMB)
+    parameter int C_FC   = 192,   // merge Phase-B FC channels
+    // ── Swin Block ────────────────────────────────────────────────────────
     parameter int N_PATCHES  = 49,
-    parameter int C_MSA      = 96,    // MSA feature depth
-    parameter int C_FFN      = 384,   // FFN expanded depth
+    parameter int C_MSA      = 96,
+    parameter int C_FFN      = 384,
     parameter int N_HEADS    = 3,
-    parameter int HEAD_DIM   = 32,    // C_MSA / N_HEADS
-    parameter int N_ROWS     = 7      // MMU burst height
+    parameter int HEAD_DIM   = 32,
+    parameter int N_ROWS     = 7
 )(
     input  logic        clk,
     input  logic        rst_n,
+
+    // =========================================================================
+    // ilb_patch_embed_buf — Patch Embedding output  (56×56×96 INT8)
+    // =========================================================================
+    // Write port (from post-quantiser output path, 7 pixels/cycle)
+    input  logic        emb_wr_en,
+    input  logic [6:0]  emb_wr_ch,           // channel   0 .. 95
+    input  logic [5:0]  emb_wr_row,          // row       0 .. 55
+    input  logic [2:0]  emb_wr_col_grp,      // col group 0 .. 7
+    input  logic [7:0]  emb_wr_data [0:N_ROWS-1],
+
+    // Read port (32-bit word, used by patch-merge controller)
+    input  logic        emb_rd_en,
+    input  logic [16:0] emb_rd_addr,         // word addr 0 .. 75263
+    output logic [31:0] emb_rd_data,
+
+    // Status
+    output logic        emb_embed_done,      // pulse: all 96ch written
+    input  logic        emb_flush_req,
+    output logic        emb_flush_done,
+
+    // =========================================================================
+    // ilb_patch_merge_buf — Patch Merging store  (28×28×384 / 28×28×192)
+    // =========================================================================
+    // Phase-A write (spatial merge, 1 byte/cycle)
+    input  logic        mrg_spa_wr_en,
+    input  logic [17:0] mrg_spa_wr_addr,     // byte addr 0 .. 301055
+    input  logic [7:0]  mrg_spa_wr_data,
+
+    // Phase-A read (32-bit word for off-chip DMA)
+    input  logic        mrg_pa_rd_en,
+    input  logic [16:0] mrg_pa_rd_addr,      // word addr 0 .. 75263
+    output logic [31:0] mrg_pa_rd_data,
+
+    // Phase-B write (FC-layer result, 7 bytes/cycle from output buffer)
+    input  logic        mrg_fc_wr_en,
+    input  logic [9:0]  mrg_fc_wr_row_base,  // patch 0 .. 777
+    input  logic [7:0]  mrg_fc_wr_col,       // channel byte 0 .. 191
+    input  logic [7:0]  mrg_fc_wr_data [0:N_ROWS-1],
+
+    // Phase-B read (4-byte word for downstream Swin input)
+    input  logic        mrg_pb_rd_en,
+    input  logic [9:0]  mrg_pb_rd_patch,     // patch 0 .. 783
+    input  logic [7:0]  mrg_pb_rd_col,       // byte col (word-aligned)
+    output logic [31:0] mrg_pb_rd_data,
+
+    // Status
+    output logic        mrg_spa_done,        // pulse: Phase-A complete
+    output logic        mrg_fc_done,         // pulse: Phase-B complete
+    input  logic        mrg_flush_req,
+    output logic        mrg_flush_done,
 
     // =========================================================================
     // ilb_qkv_buf — Q / K / V / Proj output  (49 × 96 INT8)
@@ -178,8 +266,63 @@ module ilb_swin_block #(
     output logic [31:0] ffn1_rd_data
 );
 
+    // ── Patch Embedding buffer ────────────────────────────────────────────
+    ilb_patch_embed_buf #(
+        .H      (H_EMB),
+        .W      (W_EMB),
+        .C      (C_EMB),
+        .N_ROWS (N_ROWS)
+    ) u_patch_embed (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .wr_en        (emb_wr_en),
+        .wr_ch        (emb_wr_ch),
+        .wr_row       (emb_wr_row),
+        .wr_col_grp   (emb_wr_col_grp),
+        .wr_data      (emb_wr_data),
+        .rd_en        (emb_rd_en),
+        .rd_addr      (emb_rd_addr),
+        .rd_data      (emb_rd_data),
+        .embed_done   (emb_embed_done),
+        .flush_req    (emb_flush_req),
+        .flush_done   (emb_flush_done)
+    );
+
+    // ── Patch Merging buffer ──────────────────────────────────────────────
+    ilb_patch_merge_buf #(
+        .H_IN   (H_EMB),
+        .W_IN   (W_EMB),
+        .C_IN   (C_EMB),
+        .H_OUT  (H_MRG),
+        .W_OUT  (W_MRG),
+        .C_SPA  (C_SPA),
+        .C_FC   (C_FC),
+        .N_ROWS (N_ROWS)
+    ) u_patch_merge (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .spa_wr_en        (mrg_spa_wr_en),
+        .spa_wr_addr      (mrg_spa_wr_addr),
+        .spa_wr_data      (mrg_spa_wr_data),
+        .pa_rd_en         (mrg_pa_rd_en),
+        .pa_rd_addr       (mrg_pa_rd_addr),
+        .pa_rd_data       (mrg_pa_rd_data),
+        .fc_wr_en         (mrg_fc_wr_en),
+        .fc_wr_row_base   (mrg_fc_wr_row_base),
+        .fc_wr_col        (mrg_fc_wr_col),
+        .fc_wr_data       (mrg_fc_wr_data),
+        .pb_rd_en         (mrg_pb_rd_en),
+        .pb_rd_patch      (mrg_pb_rd_patch),
+        .pb_rd_col        (mrg_pb_rd_col),
+        .pb_rd_data       (mrg_pb_rd_data),
+        .spa_done         (mrg_spa_done),
+        .fc_done          (mrg_fc_done),
+        .flush_req        (mrg_flush_req),
+        .flush_done       (mrg_flush_done)
+    );
+
     // =========================================================================
-    // Sub-buffer instantiations
+    // Sub-buffer instantiations  (Swin Block)
     // =========================================================================
 
     // ── QKV / Proj buffer ─────────────────────────────────────────────────
