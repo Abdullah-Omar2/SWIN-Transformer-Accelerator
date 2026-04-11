@@ -1,43 +1,67 @@
 // =============================================================================
-// unified_input_buf.sv  (rev 5 — all 4 Swin stages supported)
+// unified_input_buf.sv  (rev 6 — Patch Merging MLP mode corrected)
 //
-// ── What changed from rev 4 ───────────────────────────────────────────────
-//   K_MAX:      384  → 3072  (Stage 4 FFN1 input row: 768 words × 4 B)
-//   K_MHA:       96  →  768  (Stage 4 C = 768 bytes per patch)
-//   BANK_BYTES: 4704 → 37632 (49 patches × 768 bytes, dominant over MLP 7×3072=21504)
-//   mlp_load_k_word: 7 bits → 10 bits  (covers 0..767 for Stage4)
-//   mha_load_k_word: 5 bits → 8 bits   (covers 0..191 for Stage4: 768/4=192 words)
-//   cap_col_byte: 9 bits → 12 bits      (covers 0..3071 for Stage4 MLP)
-//   mha_cap_patch_base / mha_patch_base: unchanged (49 patches, 6 bits)
+// ── What changed from rev 5 ───────────────────────────────────────────────
+//
+//   BUG FIX — MLP mode (Patch Merging) had two errors in K_MAX and
+//   mlp_k_bytes semantics.
+//
+//   Ground truth from ilb_patch_merge_buf:
+//     Phase-A output  = C_SPA bytes per patch (spatial concat result)
+//     FC input row    = C_SPA bytes per patch
+//     FC output row   = C_FC  bytes per patch
+//
+//   The input to the FC (and hence to the ibuf in MLP mode) is the
+//   Phase-A output: C_SPA bytes per patch, NOT C_FC.
+//
+//   Error 1 — K_MAX sized for Swin FFN1, not PM:
+//     rev 5: K_MAX = 3072  "Stage 4 FFN1 input row: 768 words × 4 B"
+//     Swin FFN1 uses mode 2'b10 (not 2'b01), so K_MAX for the MLP-mode
+//     bank layout must cover only PM stage input rows:
+//       PM1 C_SPA = 384, PM2 = 768, PM3 = 1536  → K_MAX = 1536
+//
+//     With K_MAX = 3072, row addresses in MLP mode were WRONG:
+//       row 1 started at byte 3072 instead of 1536 (for PM3)
+//       row 6 started at byte 18432 instead of 9216 (for PM3)
+//     All rows beyond row 0 were written and read at incorrect addresses.
+//     FIX: K_MAX = 1536  (PM3 C_SPA dominant in MLP mode)
+//
+//   Error 2 — mlp_k_bytes meaning was wrong:
+//     rev 5 comment: "mlp_k_bytes = valid byte count per MLP input row (96..3072)"
+//     For PM, the input row is C_SPA bytes (Phase-A result), NOT C_FC bytes.
+//     mlp_k_bytes must be C_SPA of the active PM stage:
+//       PM1: 384   PM2: 768   PM3: 1536
+//     FIX: comment corrected; mlp_k_bytes port width reduced to [10:0] (covers 1536).
+//
+//   Other sizes (MHA rows, BANK_BYTES, Swin modes) are unchanged.
+//   BANK_BYTES remains 37,632 bytes (49 patches × 768 bytes, MHA dominant).
+//     Check: 7 × 1536 = 10,752 bytes for PM3 < 37,632 — fits.
 //
 // ── Bank sizing ───────────────────────────────────────────────────────────
-//   MLP  max: 7 rows × 3072 bytes/row = 21,504 bytes
-//   MHA  max: 49 patches × 768 bytes  = 37,632 bytes
-//   CONV max: 12 × 7 × 4 = 336 bytes
-//   BANK_BYTES = max(21504, 37632) = 37,632 bytes
+//   MHA  max: 49 patches × 768 bytes      = 37,632 bytes  ← dominant
+//   MLP  max: 7 rows     × 1536 bytes     = 10,752 bytes  (PM3)
+//   CONV max: 12 PEs     × 7 wins × 4 tap =    336 bytes
+//   BANK_BYTES = 37,632  (MHA dominant, unchanged)
 //
-// ── Modes (unchanged) ─────────────────────────────────────────────────────
+// ── K_MAX change ──────────────────────────────────────────────────────────
+//   K_MAX  = 1536   was 3072 — corrected to PM3 C_SPA (MLP mode dominant)
+//   K_MHA  = 768    unchanged (Stage 4 MHA patch feature bytes)
+//
+// ── Modes ─────────────────────────────────────────────────────────────────
 //   2'b00  CONV   — Patch Embedding
-//   2'b01  MLP    — Patch Merging (any PM stage)
+//   2'b01  MLP    — Patch Merging FC input (C_SPA bytes per row)
 //   2'b10  W-MSA  — all Swin stages
 //   2'b11  SW-MSA — all Swin stages
-//
-// ── K_MHA runtime parameterisation ───────────────────────────────────────
-//   Because the patch feature width varies per Swin stage (96/192/384/768),
-//   the controller provides mha_k_bytes at runtime (set once per round):
-//     Stage1=96, Stage2=192, Stage3=384, Stage4=768
-//   The read-out valid guard uses mha_k_bytes instead of K_MHA.
-//   Similarly, mlp_k_bytes is provided for MLP rows.
 // =============================================================================
 
 module unified_input_buf #(
     parameter int N_ROWS   = 7,
-    parameter int K_MAX    = 3072,  // Stage 4 FFN1 row width in bytes
+    parameter int K_MAX    = 1536,  // CORRECTED: PM3 C_SPA = 1536 bytes (was 3072)
     parameter int N_PE     = 12,
     parameter int N_WIN    = 7,
     parameter int N_TAP    = 4,
-    parameter int MHA_ROWS = 49,    // always 49 (7×7 window, all stages)
-    parameter int K_MHA    = 768,   // Stage 4 max patch feature bytes
+    parameter int MHA_ROWS = 49,
+    parameter int K_MHA    = 768,   // Stage 4 max patch feature bytes (unchanged)
     parameter int SHIFT    = 3
 )(
     input  logic        clk,
@@ -47,16 +71,20 @@ module unified_input_buf #(
     input  logic [1:0]  mode,
     input  logic        swap,
 
-    // ── Runtime row-width signals (set once per round, stable) ────────────
-    // mlp_k_bytes: valid byte count per MLP input row (96..3072)
-    //   PM1=96, PM2=192, PM3=384, used also for FFN within Swin block
-    // mha_k_bytes: valid byte count per patch (96..768)
-    //   Stage1=96, Stage2=192, Stage3=384, Stage4=768
-    input  logic [11:0] mlp_k_bytes,    // 96..3072
-    input  logic [9:0]  mha_k_bytes,    // 96..768
+    // ── Runtime row-width signals (stable per round) ───────────────────────
+    //
+    // mlp_k_bytes: valid byte count per MLP input row = C_SPA of active PM stage
+    //   PM1=384  PM2=768  PM3=1536
+    //   CORRECTED: was described as "96..3072" (wrong); now "384..1536" (PM only)
+    //   Port width reduced to 11 bits (covers 1536; was 12 bits for 3072).
+    //
+    // mha_k_bytes: valid byte count per patch = C of active Swin stage
+    //   Stage1=96  Stage2=192  Stage3=384  Stage4=768  (unchanged)
+    input  logic [10:0] mlp_k_bytes,    // 384..1536 (C_SPA of active PM stage)
+    input  logic [9:0]  mha_k_bytes,    // 96..768   (unchanged)
 
     // ═════════════════════════════════════════════════════════════════════
-    // CONV load port  (mode == 2'b00)
+    // CONV load port  (mode 2'b00)
     // ═════════════════════════════════════════════════════════════════════
     input  logic        conv_load_en,
     input  logic [3:0]  conv_load_pe_idx,
@@ -64,54 +92,59 @@ module unified_input_buf #(
     input  logic [31:0] conv_load_data,
 
     // ═════════════════════════════════════════════════════════════════════
-    // MLP load port  (mode == 2'b01)
-    //   mlp_load_k_word : 0..767 (Stage4 768/4=192 words per row,
-    //                             but load_k_word indexes bytes/4)
+    // MLP load port  (mode 2'b01 — Patch Merging FC input)
+    //
+    // Input data is Phase-A output from ilb_patch_merge_buf:
+    //   one word (4 bytes) of the C_SPA feature vector for one of the 7 rows.
+    //
+    // mlp_load_k_word: word index within the C_SPA-byte row
+    //   PM1: 0..95   PM2: 0..191   PM3: 0..383
+    //   10-bit port covers PM3 max = 383 (unchanged).
     // ═════════════════════════════════════════════════════════════════════
     input  logic        mlp_load_en,
     input  logic [2:0]  mlp_load_row,
-    input  logic [9:0]  mlp_load_k_word,   // 10 bits: 0..767
+    input  logic [9:0]  mlp_load_k_word,   // 0..383 for PM3 (10 bits, unchanged)
     input  logic [31:0] mlp_load_data,
 
     // ═════════════════════════════════════════════════════════════════════
-    // MHA / SW-MSA load port  (mode == 2'b10 or 2'b11)
-    //   mha_load_k_word : 0..191 (Stage4: 768/4=192 words)
+    // MHA / SW-MSA load port  (mode 2'b10 or 2'b11)
+    // Unchanged from rev 5.
     // ═════════════════════════════════════════════════════════════════════
     input  logic        mha_load_en,
     input  logic [5:0]  mha_load_patch,
-    input  logic [7:0]  mha_load_k_word,   // 8 bits: 0..191
+    input  logic [7:0]  mha_load_k_word,   // 0..191 (Stage4: 768/4=192 words)
     input  logic [31:0] mha_load_data,
 
     // ═════════════════════════════════════════════════════════════════════
     // Capture port  (all non-CONV modes)
-    //   cap_col_byte : byte offset within a row
-    //     MLP: 0..K_MAX-1 (0..3071)  MHA: 0..K_MHA-1 (0..767)
+    // cap_col_byte: byte offset within the row
+    //   MLP: 0..C_SPA-1 (0..1535 for PM3)   MHA: 0..K_MHA-1 (0..767)
+    //   11 bits covers max(1535, 767) = 1535.
     // ═════════════════════════════════════════════════════════════════════
     input  logic        cap_en,
-    input  logic [11:0] cap_col_byte,          // 12 bits: 0..3071
+    input  logic [10:0] cap_col_byte,          // 0..1535 (was 12 bits for 3071)
     input  logic [31:0] cap_data [0:N_ROWS-1],
 
-    input  logic [5:0]  mha_cap_patch_base,    // 0,7,...,42
+    input  logic [5:0]  mha_cap_patch_base,    // 0,7,...,42 (unchanged)
 
     // ═════════════════════════════════════════════════════════════════════
-    // MHA / SW-MSA patch-group read base
+    // MHA patch-group read base (unchanged)
     // ═════════════════════════════════════════════════════════════════════
-    input  logic [5:0]  mha_patch_base,        // 0,7,...,42
+    input  logic [5:0]  mha_patch_base,
 
-    // Sub-cycle counter
     input  logic [2:0]  sub_cycle,
 
-    // Data output to MMU
     output logic [7:0]  data_out [0:N_PE-1][0:N_WIN-1][0:N_TAP-1],
 
-    // SW-MSA mask outputs
+    // SW-MSA mask outputs (unchanged)
     output logic [5:0]  mask_req_patch,
     output logic [1:0]  sw_patch_region
 );
 
     // ── Bank sizing ───────────────────────────────────────────────────────
     // MHA dominant: 49 × 768 = 37,632 bytes
-    localparam int BANK_BYTES = MHA_ROWS * K_MHA;  // 37,632
+    // MLP (PM3):    7  × 1536 = 10,752 bytes  (fits within MHA footprint)
+    localparam int BANK_BYTES = MHA_ROWS * K_MHA;  // 37,632 (unchanged)
 
     logic [7:0] bank [0:1][0:BANK_BYTES-1];
     logic       active;
@@ -140,9 +173,16 @@ module unified_input_buf #(
                 end
             end
 
-            // ── MLP: row × mlp_k_bytes layout ────────────────────────────
-            // bank addr = row * K_MAX + k_word * N_TAP
-            // K_MAX is the compile-time max; actual valid range is mlp_k_bytes
+            // ── MLP / Patch Merging ───────────────────────────────────────
+            // Bank layout: row × K_MAX + k_word × N_TAP
+            // K_MAX = 1536 (CORRECTED from 3072) — matches PM3 C_SPA row width.
+            // Valid bytes per row = mlp_k_bytes = C_SPA of active stage.
+            //
+            // Row address for row r, word w:  r * K_MAX + w * 4
+            //   PM1 (C_SPA=384): row 1 starts at byte 1536, row 6 at byte 9216
+            //   PM2 (C_SPA=768): row 1 starts at byte 1536, row 6 at byte 9216
+            //   PM3 (C_SPA=1536):row 1 starts at byte 1536, row 6 at byte 9216
+            // All PM stages address rows at the same K_MAX=1536 stride.
             2'b01: begin
                 if (mlp_load_en) begin
                     automatic int base = int'(mlp_load_row)    * K_MAX
@@ -160,9 +200,8 @@ module unified_input_buf #(
                 end
             end
 
-            // ── W-MSA and SW-MSA: patch × mha_k_bytes layout ─────────────
-            // bank addr = patch * K_MHA + k_word * N_TAP
-            // K_MHA is compile-time max; actual valid range is mha_k_bytes
+            // ── W-MSA and SW-MSA ──────────────────────────────────────────
+            // Bank layout unchanged: patch × K_MHA + k_word × N_TAP
             2'b10, 2'b11: begin
                 if (mha_load_en) begin
                     automatic int base = int'(mha_load_patch) * K_MHA
@@ -206,8 +245,9 @@ module unified_input_buf #(
                                 bank[active][ pe*(N_WIN*N_TAP) + win*N_TAP + tap ];
             end
 
-            // ── MLP ───────────────────────────────────────────────────────
-            // Valid guard: k < mlp_k_bytes (runtime row width)
+            // ── MLP / Patch Merging ───────────────────────────────────────
+            // Valid guard: k < mlp_k_bytes = C_SPA of active stage.
+            // addr = win * K_MAX + k   (K_MAX = 1536 — CORRECTED)
             2'b01: begin
                 automatic int vk_mlp = int'(mlp_k_bytes);
                 for (int pe = 0; pe < N_PE; pe++)
@@ -220,8 +260,6 @@ module unified_input_buf #(
             end
 
             // ── W-MSA ─────────────────────────────────────────────────────
-            // mha_patch_base offsets into the 49-row bank.
-            // Valid guard: k < mha_k_bytes (runtime patch feature width)
             2'b10: begin
                 automatic int vk_mha = int'(mha_k_bytes);
                 for (int pe = 0; pe < N_PE; pe++)
@@ -236,7 +274,7 @@ module unified_input_buf #(
                         end
             end
 
-            // ── SW-MSA — identical read-out to W-MSA ──────────────────────
+            // ── SW-MSA ────────────────────────────────────────────────────
             2'b11: begin
                 automatic int vk_sw = int'(mha_k_bytes);
                 for (int pe = 0; pe < N_PE; pe++)
@@ -256,7 +294,7 @@ module unified_input_buf #(
     end
 
     // =========================================================================
-    // SW-MSA mask outputs (mode 2'b11 only)
+    // SW-MSA mask outputs (unchanged)
     // =========================================================================
     always_comb begin
         mask_req_patch  = 6'h00;
