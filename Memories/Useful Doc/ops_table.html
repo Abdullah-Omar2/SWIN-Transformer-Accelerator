@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<!-- saved from url=(0175)file:///C:/Users/hp/AppData/Local/Packages/5319275A.WhatsAppDesktop_cv1g1gvanyjgm/LocalState/sessions/123EE9DD49B0A7BAE99D612F5B55A05EC87544E0/transfers/2026-15/ops_table.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans, system-ui, sans-serif); font-size: 13px; color: var(--color-text-primary, #1a1a1a); background: transparent; }
+
+.top { padding: 0.5rem 0 0.75rem; }
+.note { font-size: 11px; color: var(--color-text-tertiary, #888); margin-bottom: 10px; }
+
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  background: var(--color-background-secondary, #f5f5f3);
+  color: var(--color-text-secondary, #666);
+  font-size: 11px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .04em;
+  padding: 7px 10px; text-align: left;
+  border-bottom: 0.5px solid var(--color-border-secondary, #ccc);
+  white-space: nowrap;
+}
+tbody tr { border-bottom: 0.5px solid var(--color-border-tertiary, #e8e8e5); }
+tbody tr:last-child { border-bottom: none; }
+td { padding: 7px 10px; vertical-align: top; line-height: 1.55; }
+
+td.step { font-weight: 500; white-space: nowrap; min-width: 60px; }
+td.op   { font-weight: 500; }
+td.sz   { font-family: var(--font-mono, monospace); font-size: 11.5px; color: var(--color-text-secondary, #555); }
+td.note { font-size: 11px; color: var(--color-text-tertiary, #888); font-style: italic; }
+
+.badge {
+  display: inline-block; font-size: 10px; padding: 2px 6px;
+  border-radius: 3px; font-weight: 500; margin-bottom: 3px; white-space: nowrap;
+}
+.pe   { background: #EEEDFE; color: #3C3489; }
+.pm   { background: #E1F5EE; color: #085041; }
+.attn { background: #E6F1FB; color: #0C447C; }
+.ffn  { background: #FAEEDA; color: #633806; }
+.res  { background: #F1EFE8; color: #5F5E5A; }
+
+.na { color: var(--color-text-tertiary, #aaa); font-size: 11px; }
+
+/* dark-mode badge override */
+@media (prefers-color-scheme: dark) {
+  .pe   { background: #3C3489; color: #CECBF6; }
+  .pm   { background: #085041; color: #9FE1CB; }
+  .attn { background: #0C447C; color: #B5D4F4; }
+  .ffn  { background: #633806; color: #FAC775; }
+  .res  { background: #444441; color: #D3D1C7; }
+}
+
+/* thin dividers between phases */
+tr.divider td { padding-top: 0; padding-bottom: 0; height: 6px; background: var(--color-background-secondary, #f5f5f3); }
+</style>
+</head>
+<body>
+<div class="top">
+<p class="note">Stage 1 — H=W=224, C=96, window M=7, 3 heads, d_head=32. Steps 4–15 repeat ×64 windows ×2 blocks (W-MSA + SW-MSA). All sizes in bytes unless noted. All elements INT8 unless noted.</p>
+
+<table>
+<thead>
+<tr>
+  <th>#</th>
+  <th>Operation</th>
+  <th>Input</th>
+  <th>Weights</th>
+  <th>Output</th>
+  <th>Bias</th>
+</tr>
+</thead>
+<tbody>
+
+<!-- PATCH EMBEDDING -->
+<tr>
+  <td class="step">1</td>
+  <td class="op"><span class="badge pe">Patch Embedding</span><br>4×4 conv, 96 kernels, stride 4</td>
+  <td class="sz">224×224×3 = 150,528 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">FIB</span></td>
+  <td class="sz">96 kernels × 48 B = 4,608 B<br>W shape: 4×4×3 per kernel<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [0..1,151] · 12 words/kernel</span></td>
+  <td class="sz">56×56×96 = 301,056 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_patch_embed_buf</span></td>
+  <td class="sz">96 values (1 per channel)<br><span style="font-size:11px;color:var(--color-text-tertiary)">bbuf [0..95] · broadcast to 7 MMU outputs</span></td>
+</tr>
+
+<tr class="divider"><td colspan="6"></td></tr>
+
+<!-- PATCH MERGING -->
+<tr>
+  <td class="step">2</td>
+  <td class="op"><span class="badge pm">Patch Merging</span><br>Spatial concat 2×2 → 4C</td>
+  <td class="sz">56×56×96 = 301,056 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_patch_embed_buf</span></td>
+  <td class="na">— none —<br><span style="font-size:11px;color:var(--color-text-tertiary)">Pure memory rearrangement</span></td>
+  <td class="sz">28×28×384 = 301,056 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_patch_merge_buf (Phase-A)</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">3</td>
+  <td class="op"><span class="badge pm">Patch Merging</span><br>Linear reduction 384→192</td>
+  <td class="sz">784 patches × 384 = 301,056 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_patch_merge_buf → ibuf · 7 patches/cycle · K_MAX=384 · 8 sub-cycles</span></td>
+  <td class="sz">W1 (384×192): 73,728 B = 18,432 w<br>W2 (192×384): 73,728 B = 18,432 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [0..9,215] W1 · [9,216..18,431] W2<br>W1 col: 96 B (2 sub-cyc) · W2 col: 384 B (8 sub-cyc)</span></td>
+  <td class="sz">28×28×192 = 150,528 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_patch_merge_buf (Phase-B)</span></td>
+  <td class="sz">W1: 384 values · W2: 192 values<br><span style="font-size:11px;color:var(--color-text-tertiary)">bbuf [96..479] L1 · [480..575] L2 · 7 per MMU cycle</span></td>
+</tr>
+
+<tr class="divider"><td colspan="6"></td></tr>
+
+<!-- ATTENTION -->
+<tr>
+  <td class="step">4</td>
+  <td class="op"><span class="badge attn">Attention</span><br>Q projection X×W_Q</td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">FIB · ibuf 4,704 B×2 banks · 2 sub-cycles</span></td>
+  <td class="sz">W_Q: 96×96 = 9,216 B = 2,304 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [0..2,303] · 24 words/col · wbuf 96 B active</span></td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf · 96 cols × 7 patches = 672 write cycles</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">5</td>
+  <td class="op"><span class="badge attn">Attention</span><br>K projection X×W_K</td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">FIB (same window reload)</span></td>
+  <td class="sz">W_K: 96×96 = 9,216 B = 2,304 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [2,304..4,607]</span></td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf · row-major; K^T is zero-copy</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">6</td>
+  <td class="op"><span class="badge attn">Attention</span><br>V projection X×W_V</td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">FIB (same window, 3rd load)</span></td>
+  <td class="sz">W_V: 96×96 = 9,216 B = 2,304 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [4,608..6,911]</span></td>
+  <td class="sz">49×96 = 4,704 B per window<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf · head h at cols [h×32..h×32+31]</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">7</td>
+  <td class="op"><span class="badge attn">Attention</span><br>Scores S_h = Q_h × K_h^T + B</td>
+  <td class="sz">Q_h: 49×32 = 1,568 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf → ibuf · wbuf 32 B (1 sub-cycle)</span></td>
+  <td class="sz">K_h^T: 32×49 = 1,568 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf → wbuf · msa_sub_mode=01</span></td>
+  <td class="sz">49×49 INT32 = 9,604 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_score_buf · 2,401 entries/head</span></td>
+  <td class="sz">49×49 = 2,401 values (rel. pos. bias)<br><span style="font-size:11px;color:var(--color-text-tertiary)">bbuf [576..2,976] · row-major · 7 vals/cycle<br>SW-MSA: mask also added in-place (RMW)</span></td>
+</tr>
+<tr>
+  <td class="step">8</td>
+  <td class="op"><span class="badge attn">Attention</span><br>Softmax (per row, per head)</td>
+  <td class="sz">49×49 INT32 = 9,604 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_score_buf → SCU</span></td>
+  <td class="na">— none —<br><span style="font-size:11px;color:var(--color-text-tertiary)">SCU unit, no learned weights</span></td>
+  <td class="sz">49×49 INT8 = 2,401 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_score_buf (in-place overwrite)</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">9</td>
+  <td class="op"><span class="badge attn">Attention</span><br>Context A_h = S_h × V_h</td>
+  <td class="sz">S_h: 49×49 INT8 = 2,401 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_score_buf → ibuf · wbuf 52 B (2 sub-cyc, padded)</span></td>
+  <td class="sz">V_h: 49×32 = 1,568 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf → wbuf · 49 elem padded to 52 · msa_sub_mode=10</span></td>
+  <td class="sz">A_h: 49×32 = 1,568 B per head<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_context_buf · head h at cols [h×32..h×32+31]<br>After 3 heads: concat 49×96 = 4,704 B</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">10</td>
+  <td class="op"><span class="badge attn">Attention</span><br>Projection concat(A)×W_Proj</td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_context_buf → ibuf · 96 B/col · 2 sub-cycles</span></td>
+  <td class="sz">W_Proj: 96×96 = 9,216 B = 2,304 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [6,912..9,215]</span></td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_qkv_buf (proj phase)</span></td>
+  <td class="sz">96 values (1 per output channel)<br><span style="font-size:11px;color:var(--color-text-tertiary)">bbuf [0..95] (shared with Conv slot)</span></td>
+</tr>
+
+<tr class="divider"><td colspan="6"></td></tr>
+
+<!-- RESIDUAL 1 -->
+<tr>
+  <td class="step">11</td>
+  <td class="op"><span class="badge res">Residual</span><br>Add 1: Out_MSA = Proj + X</td>
+  <td class="sz">Proj 49×96 = 4,704 B (ilb_qkv_buf)<br>X 49×96 = 4,704 B (FIB)<br><span style="font-size:11px;color:var(--color-text-tertiary)">Element-wise add via RMW adder</span></td>
+  <td class="na">— none —</td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_proj_buf (Phase-A)</span></td>
+  <td class="na">— none —</td>
+</tr>
+
+<tr class="divider"><td colspan="6"></td></tr>
+
+<!-- FFN -->
+<tr>
+  <td class="step">12</td>
+  <td class="op"><span class="badge ffn">FFN</span><br>Layer 1: Z = Out_MSA × W_FFN1</td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_proj_buf → ibuf · 96 B/col · 2 sub-cycles</span></td>
+  <td class="sz">W_FFN1: 96×384 = 36,864 B = 9,216 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [9,216..18,431] · col 384 B (8 sub-cyc) · msa_sub_mode=11</span></td>
+  <td class="sz">49×384 INT32 → GCU → INT8<br><span style="font-size:11px;color:var(--color-text-tertiary)">Direct to GCU; GCU output → ilb_ffn1_buf (18,816 B)</span></td>
+  <td class="na">— none —<br><span style="font-size:11px;color:var(--color-text-tertiary)">Absorbed into LayerNorm</span></td>
+</tr>
+<tr>
+  <td class="step">13</td>
+  <td class="op"><span class="badge ffn">FFN</span><br>GELU activation</td>
+  <td class="sz">49×384 INT32 = 75,264 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">Direct from MMU output buffer → GCU</span></td>
+  <td class="na">— none —<br><span style="font-size:11px;color:var(--color-text-tertiary)">GCU unit</span></td>
+  <td class="sz">49×384 INT8 = 18,816 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_ffn1_buf · 7 vals/cycle · 672 write cycles</span></td>
+  <td class="na">— none —</td>
+</tr>
+<tr>
+  <td class="step">14</td>
+  <td class="op"><span class="badge ffn">FFN</span><br>Layer 2: F = Z × W_FFN2</td>
+  <td class="sz">49×384 INT8 = 18,816 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_ffn1_buf → ibuf · 384 B/col · 8 sub-cycles</span></td>
+  <td class="sz">W_FFN2: 384×96 = 36,864 B = 9,216 w<br><span style="font-size:11px;color:var(--color-text-tertiary)">wmem [18,432..27,647] · col 96 B (2 sub-cyc) · msa_sub_mode=00</span></td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">Feeds residual add · ilb_proj_buf Phase-D</span></td>
+  <td class="sz">96 values (1 per output feature)<br><span style="font-size:11px;color:var(--color-text-tertiary)">bbuf [0..95] (reuse proj/conv slot)</span></td>
+</tr>
+
+<tr class="divider"><td colspan="6"></td></tr>
+
+<!-- RESIDUAL 2 -->
+<tr>
+  <td class="step">15</td>
+  <td class="op"><span class="badge res">Residual</span><br>Add 2: FFN_out = F + Out_MSA</td>
+  <td class="sz">F 49×96 = 4,704 B (FFN2 out)<br>Out_MSA 49×96 = 4,704 B (ilb_proj)<br><span style="font-size:11px;color:var(--color-text-tertiary)">In-place RMW on ilb_proj_buf</span></td>
+  <td class="na">— none —</td>
+  <td class="sz">49×96 = 4,704 B<br><span style="font-size:11px;color:var(--color-text-tertiary)">ilb_proj_buf (final block output)<br>MWU flushes to off-chip after ×64 windows ×2 blocks</span></td>
+  <td class="na">— none —</td>
+</tr>
+
+</tbody>
+</table>
+</div>
+
+
+</body></html>

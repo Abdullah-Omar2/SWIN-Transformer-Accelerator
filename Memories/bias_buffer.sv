@@ -1,57 +1,85 @@
 // =============================================================================
-// bias_buffer.sv  (rev 3 — all 4 Swin stages supported)
+// bias_buffer.sv  (rev 4 — bug fixes from sizing-table audit)
 //
-// ── What changed from rev 2 ───────────────────────────────────────────────
-//   AW: 12 → 16   (65,536 entries; Stage 4 QK^T = 24 heads × 2401 = 57,624)
-//   DEPTH: 4096 → 65536
-//   BB_MLP_L1_BASE: 96  → 96   (unchanged — Conv biases still 96)
-//   BB_MLP_L2_BASE: 480 → 3168 (96 + 3072; Stage4 FFN1 = 3072 biases)
-//   BB_MHA_QKT_BASE: 576 → 3936 (96 + 3072 + 768)
-//   BB_PM_BASE: 2977 → removed — PM biases now use the MLP L1/L2 region
-//   Added BB_PM_FC_BASE = 3936 (same slot as MHA QKT; PM and MHA never overlap)
+// ── What changed from rev 3 ───────────────────────────────────────────────
+//   BUG FIX 1 · Stage 1 QK^T bias count corrected:
+//     Was  Stage1 = 2,401  (49×49, 1 head only)
+//     Now  Stage1 = 7,203  (3 heads × 49×49)   ← controller must preload
+//     all head slices before asserting bb_op_start for Stage 1 attention.
+//     Stage 2 (14,406), Stage 3 (28,812), Stage 4 (57,624) were already
+//     correct and are unchanged.
+//
+//   BUG FIX 2 · Patch Merging output mux corrected:
+//     Was  mode=2'b11 → broadcast bias_reg[0] to all 7 lanes  (Conv path)
+//     Now  mode=2'b11 → bias_out[k] = bias_reg[k]  (per-column, MLP path)
+//     PM Linear layers (384→192, 768→384, 1536→768) have one unique bias
+//     value per output column, identical in structure to an MLP FC layer.
+//     Broadcasting a single value corrupted all but the first column.
+//
+//   BUG FIX 3 · Removed spurious "PM FC2 bias → BB_MLP_L2_BASE" comment:
+//     Each Patch Merging block contains exactly ONE linear layer.  There is
+//     no PM FC2.  The BB_MLP_L2_BASE slot is used exclusively for MLP/FFN
+//     FC2 and Output Projection (see Output Proj mapping below).
+//
+//   BUG FIX 4 · Output Projection bias mapping documented and clarified:
+//     Output Proj biases are 96 / 192 / 384 / 768 per stage.  They are
+//     stored at BB_MLP_L1_BASE (same region as MLP FC1 / PM) and served
+//     with mode=2'b01, since they are a plain per-column linear bias.
+//     BB_CONV_BASE (96 entries) must NOT be used for Output Proj in
+//     Stages 2-4 as it cannot hold more than 96 values.
 //
 // ── Revised Memory Map ────────────────────────────────────────────────────
 //
 //   Address range        Entries  Content
 //   ─────────────────────────────────────────────────────────────────────────
 //      0 ..     95          96    Conv  (96 output channels)
-//     96 ..   3167        3072    MLP/FFN L1  (Stage4 FFN1: 3072 output cols)
-//   3168 ..   3935         768    MLP/FFN L2  (Stage4 C=768 output cols)
-//   3936 ..  61559       57624    MHA QK^T    (Stage4: 24 heads × 49×49 = 57,624)
-//                                 Note: Stage1=2401, Stage2=14406, Stage3=28812
-//                                 Stage-specific portions are written before each round
+//     96 ..   3167        3072    MLP/FFN FC1  │ also PM Linear
+//                                              │ also Output Projection
+//                                              │ (max = Stage4: 3072 / 768)
+//   3168 ..   3935         768    MLP/FFN FC2  (max = Stage4: 768 outputs)
+//   3936 ..  61559       57624    MHA QK^T     (max = Stage4: 24h×49×49)
+//                                   Stage1 =  7,203  (3h  × 49×49)  ← FIX
+//                                   Stage2 = 14,406  (6h  × 49×49)
+//                                   Stage3 = 28,812  (12h × 49×49)
+//                                   Stage4 = 57,624  (24h × 49×49)
+//                                 Stage-specific portions written before
+//                                 each attention round.
 //  61560 ..  65535        3976    Reserved
 //   ─────────────────────────────────────────────────────────────────────────
 //   Total used: 61,560  ≤  DEPTH = 65,536  ✓
 //
-//   PM (Patch Merging) biases share the MLP L1/L2 region:
-//     PM FC1 bias → BB_MLP_L1_BASE (192/384/768 entries for PM1/2/3)
-//     PM FC2 bias → BB_MLP_L2_BASE (192/384/768 entries for PM1/2/3)
-//   This is safe because PM and Swin Block never run simultaneously.
+//   Shared-region scheduling (controller responsibility):
+//     BB_MLP_L1_BASE holds one of {MLP FC1, PM Linear, Output Proj} at a
+//     time; these operations never overlap so there is no conflict.
+//     BB_MLP_L2_BASE holds MLP FC2 only; PM has no second linear layer.
 //
-// ── QK^T bias layout (row-major) ─────────────────────────────────────────
-//   bias[head h, query q, key k] → address BB_MHA_QKT_BASE + h*(49*49) + q*49 + k
-//   The controller computes the base address for the current (head, row-group)
-//   before asserting bb_op_start.
+// ── QK^T bias layout (row-major, all heads contiguous) ───────────────────
+//   bias[head h, query q, key k] →
+//       address  BB_MHA_QKT_BASE + h*(49*49) + q*49 + k
+//   The controller must write ALL heads before asserting bb_op_start.
+//   Per-stage head counts:  S1=3  S2=6  S3=12  S4=24
 //
-// ── Per-operation behaviour (unchanged from rev 2) ────────────────────────
-//   Conv / PM (mode=2'b00 or 2'b11): broadcast bias_reg[0] to all 7 outputs
-//   MLP / FFN  (mode=2'b01):         bias_out[k] = bias_reg[k], k=0..6
-//   MHA QK^T   (mode=2'b10, op=3):   bias_out[k] = bias_reg[k], k=0..6
-//   MHA other  (mode=2'b10, op≠3):   bias_out[k] = 0
+// ── Per-operation output behaviour ───────────────────────────────────────
+//   Conv          (mode=2'b00):        broadcast bias_reg[0] to all 7 lanes
+//   MLP/FFN FC    (mode=2'b01):        bias_out[k] = bias_reg[k], k=0..6
+//   MHA QK^T      (mode=2'b10, op=3):  bias_out[k] = bias_reg[k], k=0..6
+//   MHA other ops (mode=2'b10, op≠3):  bias_out[k] = 0
+//   PM Linear     (mode=2'b11):        bias_out[k] = bias_reg[k], k=0..6
+//   Output Proj   (mode=2'b01):        bias_out[k] = bias_reg[k], k=0..6
+//     ↑ Output Proj uses the same mode as MLP FC; controller selects the
+//       correct base address (BB_MLP_L1_BASE) and stage-specific count.
 //
-// ── Interface changes from rev 2 ─────────────────────────────────────────
-//   cpu_wr_addr: 12 bits → 16 bits
-//   bb_op_base_addr: 12 bits → 16 bits
-//   No other interface changes.
+// ── Interface (unchanged from rev 3) ─────────────────────────────────────
+//   cpu_wr_addr  : 16 bits
+//   bb_op_base_addr : 16 bits
 // =============================================================================
 
 module bias_buffer #(
     parameter int AW              = 16,    // 65,536 entries
     parameter int DW              = 32,
     parameter int BB_CONV_BASE    = 0,
-    parameter int BB_MLP_L1_BASE  = 96,    // also PM FC1
-    parameter int BB_MLP_L2_BASE  = 3168,  // also PM FC2  (96 + 3072)
+    parameter int BB_MLP_L1_BASE  = 96,    // MLP FC1 / PM Linear / Output Proj
+    parameter int BB_MLP_L2_BASE  = 3168,  // MLP FC2 only  (96 + 3072)
     parameter int BB_MHA_QKT_BASE = 3936   // (3168 + 768)
 )(
     input  logic           clk,
@@ -63,7 +91,10 @@ module bias_buffer #(
     input  logic           cpu_wr_en,
 
     // ── Controller interface ───────────────────────────────────────────────
-    // mode: 2'b00=Conv  2'b01=MLP/FFN  2'b10=MHA  2'b11=PM
+    // mode: 2'b00 = Conv
+    //       2'b01 = MLP FC / Output Projection  (per-column)
+    //       2'b10 = MHA
+    //       2'b11 = PM Linear                   (per-column)
     input  logic [1:0]     mode,
     input  logic [2:0]     mmu_op_code,
 
@@ -79,7 +110,7 @@ module bias_buffer #(
 );
 
     // ── Internal RAM: 65536 × 32-bit ─────────────────────────────────────
-    localparam int DEPTH = 1 << AW;  // 65536
+    localparam int DEPTH = 1 << AW;  // 65,536
 
     logic [DW-1:0] bias_mem [0:DEPTH-1];
 
@@ -185,17 +216,20 @@ module bias_buffer #(
     assign ram_rd_addr = load_base + AW'(load_cnt_rd);
 
     // ── Output mux ────────────────────────────────────────────────────────
-    // Conv / PM (mode 00 / 11): broadcast bias_reg[0]
-    // MLP / FFN (mode 01):      bias_out[k] = bias_reg[k]
-    // MHA QK^T  (mode 10, op=3):bias_out[k] = bias_reg[k]
-    // MHA other (mode 10, op≠3):bias_out[k] = 0
+    // Conv          (mode 00): broadcast bias_reg[0] to all 7 lanes
+    // MLP/FFN / Proj(mode 01): bias_out[k] = bias_reg[k]  (per-column)
+    // MHA QK^T      (mode 10, op=3): bias_out[k] = bias_reg[k]
+    // MHA other     (mode 10, op≠3): bias_out[k] = 0
+    // PM Linear     (mode 11): bias_out[k] = bias_reg[k]  (per-column) ← FIX
+    //   PM has one unique bias value per output column, not a broadcast.
     always_comb begin
         for (int k = 0; k < 7; k++) begin
             case (mode)
-                2'b00, 2'b11: bias_out[k] = bias_reg[0];
-                2'b01:        bias_out[k] = bias_reg[k];
-                2'b10:        bias_out[k] = (mmu_op_code == 3'd3) ? bias_reg[k] : '0;
-                default:      bias_out[k] = '0;
+                2'b00:    bias_out[k] = bias_reg[0];                                    // Conv broadcast
+                2'b01:    bias_out[k] = bias_reg[k];                                    // MLP FC / Output Proj
+                2'b10:    bias_out[k] = (mmu_op_code == 3'd3) ? bias_reg[k] : '0;      // MHA
+                2'b11:    bias_out[k] = bias_reg[k];                                    // PM Linear (per-column)
+                default:  bias_out[k] = '0;
             endcase
         end
     end

@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swin Transformer — Tensor Sizing Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #F5F4F0;
+  --surface:     #FFFFFF;
+  --border:      #E0DDD6;
+  --border-hard: #BDB9B1;
+  --text:        #141210;
+  --muted:       #6E6C65;
+  --faint:       #ADADAA;
+
+  --c-pe:    #4338CA; --bg-pe:    #EEF2FF;
+  --c-wmsa:  #0369A1; --bg-wmsa:  #E0F2FE;
+  --c-swmsa: #0E7490; --bg-swmsa: #ECFEFF;
+  --c-attn:  #5B21B6; --bg-attn:  #F5F3FF;
+  --c-mlp:   #92400E; --bg-mlp:   #FEF3C7;
+  --c-pm:    #166534; --bg-pm:    #DCFCE7;
+  --c-res:   #374151; --bg-res:   #F3F4F6;
+  --c-head:  #991B1B; --bg-head:  #FEE2E2;
+}
+
+body {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding: 36px 28px 60px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  min-width: 900px;
+}
+
+/* ── Header ── */
+.page-header { margin-bottom: 28px; }
+h1 {
+  font-family: 'Syne', sans-serif;
+  font-size: 24px; font-weight: 800;
+  letter-spacing: -0.025em;
+  margin-bottom: 6px;
+}
+.meta {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--muted);
+}
+.meta span {
+  background: #ECEAE4; border-radius: 4px;
+  padding: 2px 8px; white-space: nowrap;
+}
+
+/* ── Legend ── */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 22px;
+}
+.legend-item {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted);
+}
+
+/* ── Table ── */
+table {
+  width: 100%; border-collapse: collapse;
+  background: var(--surface);
+  border-radius: 10px; overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07), 0 0 0 1px var(--border);
+}
+
+thead th {
+  background: #1A1830;
+  color: #9593B8;
+  font-family: 'Syne', sans-serif;
+  font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.09em;
+  padding: 11px 14px;
+  text-align: left; white-space: nowrap;
+  border-right: 1px solid #252340;
+}
+thead th:last-child { border-right: none; }
+
+tbody tr { border-bottom: 1px solid var(--border); }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:not(.section-header):not(.repeat-note):hover { background: #F2F1EC; }
+
+td { padding: 8px 14px; vertical-align: top; }
+
+td.num {
+  color: var(--faint); font-size: 11px; font-weight: 500;
+  white-space: nowrap; min-width: 28px; padding-right: 8px;
+}
+td.op  { min-width: 210px; }
+td.shape {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: #0F1B3A;
+}
+td.count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: #1A3E14;
+}
+td.na { color: var(--faint); font-size: 11px; font-style: italic; }
+
+.sub-val {
+  display: block; color: var(--muted);
+  font-size: 10.5px; font-family: 'JetBrains Mono', monospace;
+  margin-top: 2px;
+}
+.sub-note {
+  display: block; color: var(--faint);
+  font-size: 10px; font-style: italic;
+  font-family: 'IBM Plex Sans', sans-serif;
+  margin-top: 2px;
+}
+
+/* ── Badges ── */
+.badge {
+  display: inline-flex; align-items: center;
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.07em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 3px;
+  margin-bottom: 4px; white-space: nowrap;
+}
+.badge-pe    { background: var(--bg-pe);    color: var(--c-pe);    }
+.badge-wmsa  { background: var(--bg-wmsa);  color: var(--c-wmsa);  }
+.badge-swmsa { background: var(--bg-swmsa); color: var(--c-swmsa); }
+.badge-attn  { background: var(--bg-attn);  color: var(--c-attn);  }
+.badge-mlp   { background: var(--bg-mlp);   color: var(--c-mlp);   }
+.badge-pm    { background: var(--bg-pm);    color: var(--c-pm);    }
+.badge-res   { background: var(--bg-res);   color: var(--c-res);   }
+.badge-head  { background: var(--bg-head);  color: var(--c-head);  }
+
+.op-name { font-weight: 500; font-size: 12px; display: block; }
+.op-sub  { font-size: 10.5px; color: var(--muted); display: block; margin-top: 1px; }
+
+/* ── Section headers ── */
+tr.section-header td {
+  background: #1A1830;
+  color: #7876A4;
+  font-family: 'Syne', sans-serif;
+  font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  padding: 7px 14px; border-bottom: none;
+}
+tr.section-header td span { color: #C5C3E8; }
+
+/* ── Repeat note ── */
+tr.repeat-note td {
+  background: #F9F8F5;
+  color: var(--muted);
+  font-size: 10.5px; font-style: italic;
+  padding: 7px 14px 7px 28px;
+  border-bottom: 1px dashed var(--border);
+}
+tr.repeat-note td::before {
+  content: "↳ "; color: var(--faint);
+}
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Swin Transformer — Tensor Sizing Reference</h1>
+  <div class="meta">
+    <span>Input 224 × 224 × 3</span>
+    <span>Swin-T  |  C = 96</span>
+    <span>Stages: 2 / 2 / 6 / 2 blocks</span>
+    <span>Heads: 3 / 6 / 12 / 24</span>
+    <span>Window M = 7</span>
+    <span>d_head = 32</span>
+    <span>MLP ratio = 4×</span>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="badge badge-pe">Patch Embed</span></div>
+  <div class="legend-item"><span class="badge badge-wmsa">W-MSA</span></div>
+  <div class="legend-item"><span class="badge badge-swmsa">SW-MSA</span></div>
+  <div class="legend-item"><span class="badge badge-attn">Attention</span> (no learned wts except rel. pos. bias)</div>
+  <div class="legend-item"><span class="badge badge-mlp">MLP</span></div>
+  <div class="legend-item"><span class="badge badge-pm">Patch Merge</span></div>
+  <div class="legend-item"><span class="badge badge-res">Residual</span></div>
+  <div class="legend-item"><span class="badge badge-head">Head</span></div>
+</div>
+
+<table>
+<thead>
+<tr>
+  <th>#</th>
+  <th>Operation</th>
+  <th>Input Shape</th>
+  <th>Weight Shape &nbsp;(element count)</th>
+  <th>Bias (elements)</th>
+  <th>Output Shape</th>
+</tr>
+</thead>
+<tbody>
+
+<!-- ═══════════════════════════  PATCH EMBEDDING  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Patch Embedding</span></td></tr>
+<tr>
+  <td class="num">1</td>
+  <td class="op">
+    <span class="badge badge-pe">Patch Embed</span>
+    <span class="op-name">Conv 4×4, stride 4 · 96 output channels</span>
+  </td>
+  <td class="shape">(224, 224, 3)<span class="sub-val">= 150,528 elements</span></td>
+  <td class="count">(96, 4, 4, 3)<span class="sub-val">= 4,608 weights</span></td>
+  <td class="count">96</td>
+  <td class="shape">(56, 56, 96)<span class="sub-val">= 301,056 elements</span></td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 1 — BLOCK 1 — W-MSA  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 1 · Block 1 · W-MSA</span> &nbsp;— C=96 · tokens 56×56=3,136 · windows 8×8=64 · M=7 · heads=3 · d_head=32</td></tr>
+<tr>
+  <td class="num">2</td>
+  <td class="op">
+    <span class="badge badge-wmsa">W-MSA</span>
+    <span class="op-name">Q Projection &nbsp; X × W_Q</span>
+  </td>
+  <td class="shape">(3,136, 96)<span class="sub-note">= 56×56 tokens</span></td>
+  <td class="count">(96, 96)<span class="sub-val">= 9,216 weights</span></td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">3</td>
+  <td class="op">
+    <span class="badge badge-wmsa">W-MSA</span>
+    <span class="op-name">K Projection &nbsp; X × W_K</span>
+  </td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96)<span class="sub-val">= 9,216 weights</span></td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">4</td>
+  <td class="op">
+    <span class="badge badge-wmsa">W-MSA</span>
+    <span class="op-name">V Projection &nbsp; X × W_V</span>
+  </td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96)<span class="sub-val">= 9,216 weights</span></td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">5</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Scores &nbsp; S = Q·Kᵀ / √d + B</span>
+    <span class="op-sub">Q/K reshaped per window per head</span>
+  </td>
+  <td class="shape">Q: (64, 3, 49, 32)<br>Kᵀ: (64, 3, 32, 49)</td>
+  <td class="count">rel. pos. bias: (3, 49, 49)<span class="sub-val">= 7,203 elements</span></td>
+  <td class="na">—</td>
+  <td class="shape">(64, 3, 49, 49)<span class="sub-val">= 460,992 elements</span></td>
+</tr>
+<tr>
+  <td class="num">6</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Softmax &nbsp;(per row, per head)</span>
+  </td>
+  <td class="shape">(64, 3, 49, 49) INT32</td>
+  <td class="na">—</td>
+  <td class="na">—</td>
+  <td class="shape">(64, 3, 49, 49) INT8</td>
+</tr>
+<tr>
+  <td class="num">7</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Context &nbsp; A = S · V → concat heads</span>
+  </td>
+  <td class="shape">S: (64, 3, 49, 49)<br>V: (64, 3, 49, 32)</td>
+  <td class="na">—</td>
+  <td class="na">—</td>
+  <td class="shape">concat → (3,136, 96)<span class="sub-val">= 301,056 elements</span></td>
+</tr>
+<tr>
+  <td class="num">8</td>
+  <td class="op">
+    <span class="badge badge-wmsa">W-MSA</span>
+    <span class="op-name">Output Projection &nbsp; concat(A) × W_Proj</span>
+  </td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96)<span class="sub-val">= 9,216 weights</span></td>
+  <td class="count">96</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">9</td>
+  <td class="op">
+    <span class="badge badge-res">Residual</span>
+    <span class="op-name">Add 1 &nbsp; MSA_out = Proj + X</span>
+  </td>
+  <td class="shape">(3,136, 96) + (3,136, 96)</td>
+  <td class="na">—</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 1 — BLOCK 1 — MLP  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 1 · Block 1 · MLP</span></td></tr>
+<tr>
+  <td class="num">10</td>
+  <td class="op">
+    <span class="badge badge-mlp">MLP</span>
+    <span class="op-name">FC1 &nbsp; Z = MSA_out × W₁</span>
+  </td>
+  <td class="shape">(3,136, 96)<span class="sub-note">= (56×56, 96)</span></td>
+  <td class="count">(96, 384)<span class="sub-val">= 36,864 weights</span></td>
+  <td class="count">384</td>
+  <td class="shape">(3,136, 384)<span class="sub-val">= 1,204,224 elements</span></td>
+</tr>
+<tr>
+  <td class="num">11</td>
+  <td class="op">
+    <span class="badge badge-mlp">MLP</span>
+    <span class="op-name">GELU Activation</span>
+  </td>
+  <td class="shape">(3,136, 384)</td>
+  <td class="na">—</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 384)</td>
+</tr>
+<tr>
+  <td class="num">12</td>
+  <td class="op">
+    <span class="badge badge-mlp">MLP</span>
+    <span class="op-name">FC2 &nbsp; F = Z × W₂</span>
+  </td>
+  <td class="shape">(3,136, 384)</td>
+  <td class="count">(384, 96)<span class="sub-val">= 36,864 weights</span></td>
+  <td class="count">96</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">13</td>
+  <td class="op">
+    <span class="badge badge-res">Residual</span>
+    <span class="op-name">Add 2 &nbsp; Block1_out = F + MSA_out</span>
+  </td>
+  <td class="shape">(3,136, 96) + (3,136, 96)</td>
+  <td class="na">—</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 1 — BLOCK 2 — SW-MSA  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 1 · Block 2 · SW-MSA</span> &nbsp;— same tensor shapes as Block 1; shifted window + cyclic mask</td></tr>
+<tr>
+  <td class="num">14</td>
+  <td class="op"><span class="badge badge-swmsa">SW-MSA</span><span class="op-name">Q Projection</span></td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96) = 9,216</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">15</td>
+  <td class="op"><span class="badge badge-swmsa">SW-MSA</span><span class="op-name">K Projection</span></td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96) = 9,216</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">16</td>
+  <td class="op"><span class="badge badge-swmsa">SW-MSA</span><span class="op-name">V Projection</span></td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96) = 9,216</td>
+  <td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">17</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Scores + Cyclic Shift Mask</span>
+    <span class="op-sub">Mask added in-place (RMW) for shifted windows</span>
+  </td>
+  <td class="shape">Q: (64, 3, 49, 32)<br>Kᵀ: (64, 3, 32, 49)</td>
+  <td class="count">rel. pos. bias + mask: (3, 49, 49)<span class="sub-val">= 7,203</span></td>
+  <td class="na">—</td>
+  <td class="shape">(64, 3, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">18</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Softmax</span></td>
+  <td class="shape">(64, 3, 49, 49)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(64, 3, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">19</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Context A = S · V → concat heads</span></td>
+  <td class="shape">S: (64, 3, 49, 49)<br>V: (64, 3, 49, 32)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">concat → (3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">20</td>
+  <td class="op"><span class="badge badge-swmsa">SW-MSA</span><span class="op-name">Output Projection</span></td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 96) = 9,216</td>
+  <td class="count">96</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">21</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 1 &nbsp; MSA_out = Proj + X</span></td>
+  <td class="shape">(3,136, 96) + (3,136, 96)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 1 · Block 2 · MLP</span> &nbsp;— same shapes as Block 1 MLP</td></tr>
+<tr>
+  <td class="num">22</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC1</span></td>
+  <td class="shape">(3,136, 96)</td>
+  <td class="count">(96, 384) = 36,864</td>
+  <td class="count">384</td>
+  <td class="shape">(3,136, 384)</td>
+</tr>
+<tr>
+  <td class="num">23</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">GELU</span></td>
+  <td class="shape">(3,136, 384)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(3,136, 384)</td>
+</tr>
+<tr>
+  <td class="num">24</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC2</span></td>
+  <td class="shape">(3,136, 384)</td>
+  <td class="count">(384, 96) = 36,864</td>
+  <td class="count">96</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+<tr>
+  <td class="num">25</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 2 &nbsp; Stage1_out</span></td>
+  <td class="shape">(3,136, 96) + (3,136, 96)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(3,136, 96)</td>
+</tr>
+
+<!-- ═══════════════════════════  PATCH MERGING 1  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Patch Merging 1</span> &nbsp;→ Stage 2</td></tr>
+<tr>
+  <td class="num">26</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Spatial 2×2 concat</span>
+    <span class="op-sub">Interleave 4 spatially adjacent tokens; pure memory rearrangement</span>
+  </td>
+  <td class="shape">(56, 56, 96)<span class="sub-val">= 301,056 elements</span></td>
+  <td class="na">— none —<span class="sub-note">no learned weights</span></td>
+  <td class="na">—</td>
+  <td class="shape">(28, 28, 384)<span class="sub-val">= 301,056 elements</span></td>
+</tr>
+<tr>
+  <td class="num">27</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Linear reduction &nbsp; 384 → 192</span>
+  </td>
+  <td class="shape">(784, 384)<span class="sub-note">= (28×28, 384)</span></td>
+  <td class="count">(384, 192)<span class="sub-val">= 73,728 weights</span></td>
+  <td class="count">192</td>
+  <td class="shape">(28, 28, 192)<span class="sub-val">= 150,528 elements</span></td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 2 — BLOCK 1 — W-MSA  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 2 · Block 1 · W-MSA</span> &nbsp;— C=192 · tokens 28×28=784 · windows 4×4=16 · M=7 · heads=6 · d_head=32</td></tr>
+<tr>
+  <td class="num">28</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Q Projection</span></td>
+  <td class="shape">(784, 192)<span class="sub-val">= 150,528</span></td>
+  <td class="count">(192, 192) = 36,864</td>
+  <td class="na">—</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+<tr>
+  <td class="num">29</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">K Projection</span></td>
+  <td class="shape">(784, 192)</td>
+  <td class="count">(192, 192) = 36,864</td>
+  <td class="na">—</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+<tr>
+  <td class="num">30</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">V Projection</span></td>
+  <td class="shape">(784, 192)</td>
+  <td class="count">(192, 192) = 36,864</td>
+  <td class="na">—</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+<tr>
+  <td class="num">31</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Scores &nbsp; S = Q·Kᵀ / √d + B</span>
+  </td>
+  <td class="shape">Q: (16, 6, 49, 32)<br>Kᵀ: (16, 6, 32, 49)</td>
+  <td class="count">rel. pos. bias: (6, 49, 49)<span class="sub-val">= 14,406</span></td>
+  <td class="na">—</td>
+  <td class="shape">(16, 6, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">32</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Softmax</span></td>
+  <td class="shape">(16, 6, 49, 49)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(16, 6, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">33</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Context A = S · V → concat</span></td>
+  <td class="shape">S: (16, 6, 49, 49)<br>V: (16, 6, 49, 32)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">concat → (784, 192)</td>
+</tr>
+<tr>
+  <td class="num">34</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Output Projection</span></td>
+  <td class="shape">(784, 192)</td>
+  <td class="count">(192, 192) = 36,864</td>
+  <td class="count">192</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+<tr>
+  <td class="num">35</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 1</span></td>
+  <td class="shape">(784, 192) + (784, 192)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 2 · Block 1 · MLP</span></td></tr>
+<tr>
+  <td class="num">36</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC1</span></td>
+  <td class="shape">(784, 192)<span class="sub-note">= (28×28, 192)</span></td>
+  <td class="count">(192, 768) = 147,456</td>
+  <td class="count">768</td>
+  <td class="shape">(784, 768)<span class="sub-val">= 602,112 elements</span></td>
+</tr>
+<tr>
+  <td class="num">37</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">GELU</span></td>
+  <td class="shape">(784, 768)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(784, 768)</td>
+</tr>
+<tr>
+  <td class="num">38</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC2</span></td>
+  <td class="shape">(784, 768)</td>
+  <td class="count">(768, 192) = 147,456</td>
+  <td class="count">192</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+<tr>
+  <td class="num">39</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 2</span></td>
+  <td class="shape">(784, 192) + (784, 192)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(784, 192)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 2 · Block 2 · SW-MSA + MLP</span> &nbsp;— identical tensor shapes to Block 1; shifted windows + cyclic mask</td></tr>
+<tr class="repeat-note">
+  <td colspan="6">Steps 40–49 repeat Block 1 shapes: &nbsp;Q/K/V/Proj (192×192) · rel. pos. bias (6, 49, 49)=14,406 · MLP (192×768 / 768×192) · output (784, 192)</td>
+</tr>
+
+<!-- ═══════════════════════════  PATCH MERGING 2  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Patch Merging 2</span> &nbsp;→ Stage 3</td></tr>
+<tr>
+  <td class="num">50</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Spatial 2×2 concat</span>
+  </td>
+  <td class="shape">(28, 28, 192)<span class="sub-val">= 150,528 elements</span></td>
+  <td class="na">— none —</td>
+  <td class="na">—</td>
+  <td class="shape">(14, 14, 768)<span class="sub-val">= 150,528 elements</span></td>
+</tr>
+<tr>
+  <td class="num">51</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Linear reduction &nbsp; 768 → 384</span>
+  </td>
+  <td class="shape">(196, 768)<span class="sub-note">= (14×14, 768)</span></td>
+  <td class="count">(768, 384)<span class="sub-val">= 294,912 weights</span></td>
+  <td class="count">384</td>
+  <td class="shape">(14, 14, 384)<span class="sub-val">= 75,264 elements</span></td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 3 — BLOCK 1 — W-MSA  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 3 · Block 1 · W-MSA</span> &nbsp;— C=384 · tokens 14×14=196 · windows 2×2=4 · M=7 · heads=12 · d_head=32</td></tr>
+<tr>
+  <td class="num">52</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Q Projection</span></td>
+  <td class="shape">(196, 384)<span class="sub-val">= 75,264</span></td>
+  <td class="count">(384, 384) = 147,456</td>
+  <td class="na">—</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+<tr>
+  <td class="num">53</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">K Projection</span></td>
+  <td class="shape">(196, 384)</td>
+  <td class="count">(384, 384) = 147,456</td>
+  <td class="na">—</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+<tr>
+  <td class="num">54</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">V Projection</span></td>
+  <td class="shape">(196, 384)</td>
+  <td class="count">(384, 384) = 147,456</td>
+  <td class="na">—</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+<tr>
+  <td class="num">55</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Scores &nbsp; S = Q·Kᵀ / √d + B</span>
+  </td>
+  <td class="shape">Q: (4, 12, 49, 32)<br>Kᵀ: (4, 12, 32, 49)</td>
+  <td class="count">rel. pos. bias: (12, 49, 49)<span class="sub-val">= 28,812</span></td>
+  <td class="na">—</td>
+  <td class="shape">(4, 12, 49, 49)<span class="sub-val">= 115,248 elements</span></td>
+</tr>
+<tr>
+  <td class="num">56</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Softmax</span></td>
+  <td class="shape">(4, 12, 49, 49)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(4, 12, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">57</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Context A = S · V → concat</span></td>
+  <td class="shape">S: (4, 12, 49, 49)<br>V: (4, 12, 49, 32)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">concat → (196, 384)</td>
+</tr>
+<tr>
+  <td class="num">58</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Output Projection</span></td>
+  <td class="shape">(196, 384)</td>
+  <td class="count">(384, 384) = 147,456</td>
+  <td class="count">384</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+<tr>
+  <td class="num">59</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 1</span></td>
+  <td class="shape">(196, 384) + (196, 384)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 3 · Block 1 · MLP</span></td></tr>
+<tr>
+  <td class="num">60</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC1</span></td>
+  <td class="shape">(196, 384)<span class="sub-note">= (14×14, 384)</span></td>
+  <td class="count">(384, 1,536) = 589,824</td>
+  <td class="count">1,536</td>
+  <td class="shape">(196, 1,536)<span class="sub-val">= 301,056 elements</span></td>
+</tr>
+<tr>
+  <td class="num">61</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">GELU</span></td>
+  <td class="shape">(196, 1,536)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(196, 1,536)</td>
+</tr>
+<tr>
+  <td class="num">62</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC2</span></td>
+  <td class="shape">(196, 1,536)</td>
+  <td class="count">(1,536, 384) = 589,824</td>
+  <td class="count">384</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+<tr>
+  <td class="num">63</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 2</span></td>
+  <td class="shape">(196, 384) + (196, 384)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(196, 384)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 3 · Blocks 2–6</span> &nbsp;— alternating SW-MSA / W-MSA; all tensor shapes identical to Block 1</td></tr>
+<tr class="repeat-note">
+  <td colspan="6">Block 2 SW-MSA+MLP · Block 3 W-MSA+MLP · Block 4 SW-MSA+MLP · Block 5 W-MSA+MLP · Block 6 SW-MSA+MLP
+    — each block: Q/K/V/Proj (384×384) · rel. pos. bias (12,49,49)=28,812 · MLP (384×1,536 / 1,536×384) · output (196, 384)</td>
+</tr>
+
+<!-- ═══════════════════════════  PATCH MERGING 3  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Patch Merging 3</span> &nbsp;→ Stage 4</td></tr>
+<tr>
+  <td class="num">64</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Spatial 2×2 concat</span>
+  </td>
+  <td class="shape">(14, 14, 384)<span class="sub-val">= 75,264 elements</span></td>
+  <td class="na">— none —</td>
+  <td class="na">—</td>
+  <td class="shape">(7, 7, 1,536)<span class="sub-val">= 75,264 elements</span></td>
+</tr>
+<tr>
+  <td class="num">65</td>
+  <td class="op">
+    <span class="badge badge-pm">Patch Merge</span>
+    <span class="op-name">Linear reduction &nbsp; 1,536 → 768</span>
+  </td>
+  <td class="shape">(49, 1,536)<span class="sub-note">= (7×7, 1,536)</span></td>
+  <td class="count">(1,536, 768)<span class="sub-val">= 1,179,648 weights</span></td>
+  <td class="count">768</td>
+  <td class="shape">(7, 7, 768)<span class="sub-val">= 37,632 elements</span></td>
+</tr>
+
+<!-- ═══════════════════════════  STAGE 4 — BLOCK 1 — W-MSA  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Stage 4 · Block 1 · W-MSA</span> &nbsp;— C=768 · tokens 7×7=49 · windows 1×1=1 · M=7 · heads=24 · d_head=32</td></tr>
+<tr>
+  <td class="num">66</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Q Projection</span></td>
+  <td class="shape">(49, 768)<span class="sub-val">= 37,632</span></td>
+  <td class="count">(768, 768) = 589,824</td>
+  <td class="na">—</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+<tr>
+  <td class="num">67</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">K Projection</span></td>
+  <td class="shape">(49, 768)</td>
+  <td class="count">(768, 768) = 589,824</td>
+  <td class="na">—</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+<tr>
+  <td class="num">68</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">V Projection</span></td>
+  <td class="shape">(49, 768)</td>
+  <td class="count">(768, 768) = 589,824</td>
+  <td class="na">—</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+<tr>
+  <td class="num">69</td>
+  <td class="op">
+    <span class="badge badge-attn">Attention</span>
+    <span class="op-name">Scores &nbsp; S = Q·Kᵀ / √d + B</span>
+    <span class="op-sub">Single window covers entire 7×7 feature map</span>
+  </td>
+  <td class="shape">Q: (1, 24, 49, 32)<br>Kᵀ: (1, 24, 32, 49)</td>
+  <td class="count">rel. pos. bias: (24, 49, 49)<span class="sub-val">= 57,624</span></td>
+  <td class="na">—</td>
+  <td class="shape">(1, 24, 49, 49)<span class="sub-val">= 57,624 elements</span></td>
+</tr>
+<tr>
+  <td class="num">70</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Softmax</span></td>
+  <td class="shape">(1, 24, 49, 49)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(1, 24, 49, 49)</td>
+</tr>
+<tr>
+  <td class="num">71</td>
+  <td class="op"><span class="badge badge-attn">Attention</span><span class="op-name">Context A = S · V → concat</span></td>
+  <td class="shape">S: (1, 24, 49, 49)<br>V: (1, 24, 49, 32)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">concat → (49, 768)</td>
+</tr>
+<tr>
+  <td class="num">72</td>
+  <td class="op"><span class="badge badge-wmsa">W-MSA</span><span class="op-name">Output Projection</span></td>
+  <td class="shape">(49, 768)</td>
+  <td class="count">(768, 768) = 589,824</td>
+  <td class="count">768</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+<tr>
+  <td class="num">73</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 1</span></td>
+  <td class="shape">(49, 768) + (49, 768)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 4 · Block 1 · MLP</span></td></tr>
+<tr>
+  <td class="num">74</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC1</span></td>
+  <td class="shape">(49, 768)<span class="sub-note">= (7×7, 768)</span></td>
+  <td class="count">(768, 3,072) = 2,359,296</td>
+  <td class="count">3,072</td>
+  <td class="shape">(49, 3,072)<span class="sub-val">= 150,528 elements</span></td>
+</tr>
+<tr>
+  <td class="num">75</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">GELU</span></td>
+  <td class="shape">(49, 3,072)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(49, 3,072)</td>
+</tr>
+<tr>
+  <td class="num">76</td>
+  <td class="op"><span class="badge badge-mlp">MLP</span><span class="op-name">FC2</span></td>
+  <td class="shape">(49, 3,072)</td>
+  <td class="count">(3,072, 768) = 2,359,296</td>
+  <td class="count">768</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+<tr>
+  <td class="num">77</td>
+  <td class="op"><span class="badge badge-res">Residual</span><span class="op-name">Add 2</span></td>
+  <td class="shape">(49, 768) + (49, 768)</td>
+  <td class="na">—</td><td class="na">—</td>
+  <td class="shape">(49, 768)</td>
+</tr>
+
+<tr class="section-header"><td colspan="6"><span>Stage 4 · Block 2 · SW-MSA + MLP</span> &nbsp;— identical tensor shapes to Block 1; shifted window</td></tr>
+<tr class="repeat-note">
+  <td colspan="6">Steps 78–87 repeat Block 1 shapes: &nbsp;Q/K/V/Proj (768×768) · rel. pos. bias (24,49,49)=57,624 · MLP (768×3,072 / 3,072×768) · output (49, 768)</td>
+</tr>
+
+<!-- ═══════════════════════════  CLASSIFICATION HEAD  ═══ -->
+<tr class="section-header"><td colspan="6"><span>Classification Head</span></td></tr>
+<tr>
+  <td class="num">88</td>
+  <td class="op">
+    <span class="badge badge-head">Head</span>
+    <span class="op-name">Global Average Pooling</span>
+    <span class="op-sub">Spatial mean over 7×7 positions</span>
+  </td>
+  <td class="shape">(7, 7, 768)<span class="sub-note">= (49, 768)</span></td>
+  <td class="na">— none —</td>
+  <td class="na">—</td>
+  <td class="shape">(768,)</td>
+</tr>
+<tr>
+  <td class="num">89</td>
+  <td class="op">
+    <span class="badge badge-head">Head</span>
+    <span class="op-name">FC Classifier</span>
+    <span class="op-sub">ImageNet-1K: 768 → 1,000 classes</span>
+  </td>
+  <td class="shape">(768,)</td>
+  <td class="count">(768, 1,000)<span class="sub-val">= 768,000 weights</span></td>
+  <td class="count">1,000</td>
+  <td class="shape">(1,000,)<span class="sub-note">logits over 1,000 classes</span></td>
+</tr>
+
+</tbody>
+</table>
+</body>
+</html>
