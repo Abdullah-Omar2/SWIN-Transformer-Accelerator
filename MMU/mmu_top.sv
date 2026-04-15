@@ -8,7 +8,7 @@ module mmu_top (
     output logic       valid_out,
     input  logic [7:0]  mmu_in   [0:11][0:6][0:3],
     input  logic [7:0]  mmu_w    [0:11][0:3],
-    input  logic [31:0] mmu_bias [0:11],
+    input  logic [31:0] mmu_bias [0:6],
     output logic [31:0] mmu_out  [0:6]
 );
     wire flush;
@@ -25,6 +25,7 @@ module mmu_top (
         .clk       (clk),
         .rst_n     (rst_n),
         .flush     (flush),
+        .valid_out (valid_out),
         .mmu_in    (mmu_in),
         .mmu_w     (mmu_w),
         .mmu_bias  (mmu_bias),

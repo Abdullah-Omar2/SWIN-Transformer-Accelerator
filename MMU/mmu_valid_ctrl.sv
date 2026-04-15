@@ -12,6 +12,7 @@ logic [6:0] count_mod;
 logic [6:0] counter;
 logic       busy;
 logic       valid_d;
+logic       valid_out_reg;
 
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) valid_d <= 0;
@@ -34,17 +35,15 @@ always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         counter   <= 0;
         busy      <= 0;
-        valid_out <= 0;
     end else begin
         counter   <= 0;
-        valid_out <= 0;
         if (valid_in) begin
             if (op_code == 3'd0 || op_code == 3'd2) begin
-                valid_out <= valid_d;
+                valid_out_reg <= valid_d;
                 busy      <= 0;
             end else begin
                 if (busy && counter == count_mod-1) begin
-                    valid_out <= 1;
+                    valid_out_reg <= 1;
                     counter   <= 0;
                     busy      <= 0;
                     if (valid_in) begin
@@ -63,13 +62,26 @@ always_ff @(posedge clk or negedge rst_n) begin
     end
 end
 
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) flush <= 1'b0;
-    else        flush <= 1'b0;
+always_comb @(*) begin
+    valid_out = 0;
+    if (valid_in) begin
+        if (op_code == 3'd0 || op_code == 3'd2) begin
+            valid_out = valid_d;
+        end else begin
+            if (busy && counter == count_mod-1) begin
+                valid_out = 1;
+            end else if (op_code == 3'd0 || op_code == 3'd2 || (busy && counter == count_mod-1)) begin
+                valid_out=valid_out_reg;
+            end else begin
+                valid_out = 0;
+            end
+        end
+    end
 end
 
 always @(negedge clk or negedge rst_n) begin
-    if (!rst_n)      flush <= 1'b0;
-    else if (valid_out) flush <= 1'b1;
+    if (!rst_n)      flush <= 1'b1;
+    else if (!(valid_out || valid_in)) flush <= 1'b1;
+    else             flush <= 1'b0;
 end
 endmodule
